@@ -5,8 +5,8 @@ saved addon data, shares permitted market observations and downloads signed
 research. Private profit/loss totals stay local. This repository contains the
 desktop application, its tests and build/signing files only.
 
-**Preparation only:** the owner selected MIT for this desktop-only source.
-Source publication still awaits the owner's approval. SignPath has not approved this project; no signed release is
+**Review candidate:** the owner selected MIT for this desktop-only source.
+SignPath has not approved this project; no signed release is
 claimed. The addon, website, backend and operational records are not included.
 
 ## Build
@@ -42,7 +42,7 @@ artwork is MIT; see `LICENSE`. Third-party notices remain separate under
 `licenses/` and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). SignPath is not
 being asked to sign proprietary addon code or re-sign upstream libraries.
 
-Contact: github@blahh.us. This address is a draft project contact, not evidence
-that a GitHub or SignPath account is configured or that any message was sent.
+Contact: github@blahh.us. Project maintainer: [foreverflip](https://github.com/foreverflip).
+SignPath account provisioning and signing approval are still pending.
 WoW and related game marks belong to their respective owners; no affiliation
 or endorsement is claimed. See [SECURITY.md](SECURITY.md) for private reporting.

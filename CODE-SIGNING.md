@@ -6,10 +6,10 @@ candidate. The required provider attribution will be added as a live claim only
 after acceptance; proposed wording: Free code signing provided by SignPath.io,
 certificate by SignPath Foundation.
 
-Project contact/owner contact: github@blahh.us. The owner must confirm the public
-GitHub account/team and copyright holder before publication. Committers and
-reviewers are owner-designated maintainers; signing approver is the owner or a
-separately named trusted maintainer. All maintainers require MFA. Configure the
+Project contact/owner contact: github@blahh.us. Repository owner, committer and
+reviewer: [foreverflip](https://github.com/foreverflip). The designated signing
+approver is that owner; the corresponding provider role is not provisioned yet.
+Every signing request requires manual owner approval. All maintainers require MFA. Configure the
 GitHub `signpath-production` environment with a required human reviewer and
 protected main branch, then configure SignPath policies with manual approval.
 Do not treat an AI review as a maintainer identity or a human signing approval.
@@ -59,10 +59,10 @@ The provider must review/activate the XML configuration templates in
 
 ## Acceptance and rollback
 
-Before publication: approve the exact desktop-only diff; MIT has been selected by the owner;
-confirm dependency/notices and contact identity; resolve the eligibility/privacy
-questions; review the new repository's entire initial commit; then separately
-approve making it public and enabling signing. A local build is not a verified
+The owner reviewed and approved the desktop-only source and MIT publication.
+Before signing activation: confirm dependency/notices and maintainer MFA; resolve
+the eligibility/privacy questions; configure enforced source/environment safeguards
+and provider policies; then separately approve enabling signing. A local build is not a verified
 GitHub provenance run. A future initial signed candidate needs a real provider
 run and clean-machine install/update verification; no such result is claimed now.
 
