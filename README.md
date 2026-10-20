@@ -5,8 +5,8 @@ saved addon data, shares permitted market observations and downloads signed
 research. Private profit/loss totals stay local. This repository contains the
 desktop application, its tests and build/signing files only.
 
-**Preparation only:** proposed MIT licensing and source publication await the
-owner's approval. SignPath has not approved this project; no signed release is
+**Preparation only:** the owner selected MIT for this desktop-only source.
+Source publication still awaits the owner's approval. SignPath has not approved this project; no signed release is
 claimed. The addon, website, backend and operational records are not included.
 
 ## Build
@@ -37,7 +37,7 @@ approved configuration is supplied and never publishes production feeds.
 
 ## License and support
 
-The proposed license for original source, scripts, docs and generated preview
+The license for original source, scripts, docs and generated preview
 artwork is MIT; see `LICENSE`. Third-party notices remain separate under
 `licenses/` and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). SignPath is not
 being asked to sign proprietary addon code or re-sign upstream libraries.

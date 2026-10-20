@@ -59,7 +59,7 @@ The provider must review/activate the XML configuration templates in
 
 ## Acceptance and rollback
 
-Before publication: approve the exact desktop-only diff/proposed MIT license;
+Before publication: approve the exact desktop-only diff; MIT has been selected by the owner;
 confirm dependency/notices and contact identity; resolve the eligibility/privacy
 questions; review the new repository's entire initial commit; then separately
 approve making it public and enabling signing. A local build is not a verified
