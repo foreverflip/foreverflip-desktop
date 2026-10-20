@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Version>0.1.43-preview.1</Version>
+    <AssemblyName>ForeverFlip</AssemblyName>
+    <ApplicationIcon>Assets/ForeverFlip.ico</ApplicationIcon>
+    <StartupObject>ForeverFlip.Desktop.Program</StartupObject>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Product>ForeverFlip Desktop</Product>
+    <Company>ForeverFlip</Company>
+    <Copyright>Copyright (c) 2026 ForeverFlip contributors</Copyright>
+    <FileVersion>0.1.43.0</FileVersion>
+    <AssemblyVersion>0.1.43.0</AssemblyVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets/ForeverFlip.png" />
+    <EmbeddedResource Include="RELEASE-NOTES.md" />
+    <Resource Include="Assets/ForeverFlip.ico" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
+    <None Include="Assets/pack-public.pem" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Assets/release-public.pem" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

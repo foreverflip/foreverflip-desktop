@@ -1,0 +1,105 @@
+name: Manually approved SignPath build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  sign:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    environment: signpath-production
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          global-json-file: global.json
+      - name: Require owner and provider setup
+        shell: pwsh
+        env:
+          SIGNING_ENABLED: ${{ vars.SIGNPATH_ENABLED }}
+          ORGANIZATION: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          PROJECT: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          APP_POLICY: ${{ vars.SIGNPATH_APP_POLICY_SLUG }}
+          SETUP_POLICY: ${{ vars.SIGNPATH_SETUP_POLICY_SLUG }}
+        run: |
+          if($env:SIGNING_ENABLED -ne 'true'){throw 'Signing is not enabled: owner review and SignPath approval are required.'}
+          foreach($name in 'ORGANIZATION','PROJECT','APP_POLICY','SETUP_POLICY'){
+            if(-not [Environment]::GetEnvironmentVariable($name)){throw "Missing signing configuration: $name"}
+          }
+      - name: Test and build own binaries
+        shell: pwsh
+        run: |
+          ./scripts/Build.ps1 -Publish
+          New-Item -ItemType Directory artifacts/to-sign-app | Out-Null
+          Copy-Item artifacts/app/ForeverFlip.exe,artifacts/app/ForeverFlip.dll artifacts/to-sign-app/
+          ./scripts/Signing-Metadata.ps1 -File artifacts/app/ForeverFlip.exe -Prefix app >> $env:GITHUB_OUTPUT
+        id: metadata
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: app
+        with:
+          name: own-app-binaries-unsigned
+          path: artifacts/to-sign-app/*
+          if-no-files-found: error
+      - uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_APP_POLICY_SLUG }}
+          artifact-configuration-slug: own-app-binaries
+          github-artifact-id: ${{ steps.app.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: artifacts/signed-app
+          parameters: |
+            productVersion: ${{ toJSON(steps.metadata.outputs.appProductVersion) }}
+            fileVersion: ${{ toJSON(steps.metadata.outputs.appFileVersion) }}
+      - name: Verify own signatures and package
+        shell: pwsh
+        run: |
+          ./scripts/Verify-Signatures.ps1 -Paths artifacts/signed-app/ForeverFlip.exe,artifacts/signed-app/ForeverFlip.dll
+          Copy-Item artifacts/signed-app/ForeverFlip.exe,artifacts/signed-app/ForeverFlip.dll artifacts/app/ -Force
+          ./scripts/Pack.ps1
+          ./scripts/Signing-Metadata.ps1 -File artifacts/releases/ForeverFlip-win-Setup.exe -Prefix setup >> $env:GITHUB_OUTPUT
+        id: setupMetadata
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: setup
+        with:
+          name: own-installer-unsigned
+          path: artifacts/releases/ForeverFlip-win-Setup.exe
+          if-no-files-found: error
+      - uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SETUP_POLICY_SLUG }}
+          artifact-configuration-slug: own-installer
+          github-artifact-id: ${{ steps.setup.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: artifacts/signed-setup
+          parameters: |
+            productVersion: ${{ toJSON(steps.setupMetadata.outputs.setupProductVersion) }}
+            fileVersion: ${{ toJSON(steps.setupMetadata.outputs.setupFileVersion) }}
+      - name: Verify final installer and hash final bytes
+        shell: pwsh
+        run: |
+          ./scripts/Verify-Signatures.ps1 -Paths artifacts/signed-setup/ForeverFlip-win-Setup.exe
+          Copy-Item artifacts/signed-setup/ForeverFlip-win-Setup.exe artifacts/releases/ -Force
+          Get-ChildItem artifacts/releases -File | Sort-Object Name | ForEach-Object {
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()+'  '+$_.Name
+          } | Set-Content artifacts/SHA256SUMS.txt
+          Copy-Item artifacts/SHA256SUMS.txt artifacts/releases/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-desktop-for-owner-review
+          path: artifacts/releases/*
+          if-no-files-found: error
+          retention-days: 14
+# No GitHub Release or production-feed publication. ES256 release metadata is
+# generated separately from final Authenticode-signed bytes after owner approval.
