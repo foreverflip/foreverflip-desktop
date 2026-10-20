@@ -6,10 +6,15 @@ permissions:
   actions: read
 jobs:
   sign:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && vars.SIGNPATH_ENABLED == 'true' && vars.SIGNPATH_APPROVED == 'true'
     runs-on: windows-2022
     environment: signpath-production
     timeout-minutes: 90
+    concurrency:
+      group: signpath-production
+      cancel-in-progress: false
+    env:
+      SIGNPATH_CERTIFICATE_SHA256: ${{ vars.SIGNPATH_CERTIFICATE_SHA256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -20,16 +25,14 @@ jobs:
       - name: Require owner and provider setup
         shell: pwsh
         env:
-          SIGNING_ENABLED: ${{ vars.SIGNPATH_ENABLED }}
-          ORGANIZATION: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          PROJECT: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          APP_POLICY: ${{ vars.SIGNPATH_APP_POLICY_SLUG }}
-          SETUP_POLICY: ${{ vars.SIGNPATH_SETUP_POLICY_SLUG }}
-        run: |
-          if($env:SIGNING_ENABLED -ne 'true'){throw 'Signing is not enabled: owner review and SignPath approval are required.'}
-          foreach($name in 'ORGANIZATION','PROJECT','APP_POLICY','SETUP_POLICY'){
-            if(-not [Environment]::GetEnvironmentVariable($name)){throw "Missing signing configuration: $name"}
-          }
+          SIGNPATH_ENABLED: ${{ vars.SIGNPATH_ENABLED }}
+          SIGNPATH_APPROVED: ${{ vars.SIGNPATH_APPROVED }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_APP_POLICY_SLUG: ${{ vars.SIGNPATH_APP_POLICY_SLUG }}
+          SIGNPATH_SETUP_POLICY_SLUG: ${{ vars.SIGNPATH_SETUP_POLICY_SLUG }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: ./scripts/Assert-SigningReady.ps1
       - name: Test and build own binaries
         shell: pwsh
         run: |
@@ -61,7 +64,7 @@ jobs:
       - name: Verify own signatures and package
         shell: pwsh
         run: |
-          ./scripts/Verify-Signatures.ps1 -Paths artifacts/signed-app/ForeverFlip.exe,artifacts/signed-app/ForeverFlip.dll
+          ./scripts/Verify-Signatures.ps1 -Paths artifacts/signed-app/ForeverFlip.exe,artifacts/signed-app/ForeverFlip.dll -ExpectedProductVersion '${{ steps.metadata.outputs.appProductVersion }}' -ExpectedFileVersion '${{ steps.metadata.outputs.appFileVersion }}'
           Copy-Item artifacts/signed-app/ForeverFlip.exe,artifacts/signed-app/ForeverFlip.dll artifacts/app/ -Force
           ./scripts/Pack.ps1
           ./scripts/Signing-Metadata.ps1 -File artifacts/releases/ForeverFlip-win-Setup.exe -Prefix setup >> $env:GITHUB_OUTPUT
@@ -89,8 +92,9 @@ jobs:
       - name: Verify final installer and hash final bytes
         shell: pwsh
         run: |
-          ./scripts/Verify-Signatures.ps1 -Paths artifacts/signed-setup/ForeverFlip-win-Setup.exe
+          ./scripts/Verify-Signatures.ps1 -Paths artifacts/signed-setup/ForeverFlip-win-Setup.exe -ExpectedProductVersion '${{ steps.setupMetadata.outputs.setupProductVersion }}' -ExpectedFileVersion '${{ steps.setupMetadata.outputs.setupFileVersion }}'
           Copy-Item artifacts/signed-setup/ForeverFlip-win-Setup.exe artifacts/releases/ -Force
+          @{repository=$env:GITHUB_REPOSITORY;commit=$env:GITHUB_SHA;runId=$env:GITHUB_RUN_ID;certificateSHA256=$env:SIGNPATH_CERTIFICATE_SHA256;productVersion='${{ steps.metadata.outputs.appProductVersion }}'} | ConvertTo-Json | Set-Content artifacts/releases/BUILD-PROVENANCE.json
           Get-ChildItem artifacts/releases -File | Sort-Object Name | ForEach-Object {
             (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()+'  '+$_.Name
           } | Set-Content artifacts/SHA256SUMS.txt

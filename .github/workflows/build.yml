@@ -19,7 +19,9 @@ jobs:
           global-json-file: global.json
       - name: Test and publish desktop only
         shell: pwsh
-        run: ./scripts/Build.ps1 -Publish
+        run: |
+          ./scripts/Test-Signing.ps1
+          ./scripts/Build.ps1 -Publish
       - name: Package unsigned review build
         shell: pwsh
         run: ./scripts/Pack.ps1

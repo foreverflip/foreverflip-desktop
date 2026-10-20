@@ -9,9 +9,13 @@ certificate by SignPath Foundation.
 Project contact/owner contact: github@blahh.us. Repository owner, committer and
 reviewer: [foreverflip](https://github.com/foreverflip). The designated signing
 approver is that owner; the corresponding provider role is not provisioned yet.
-Every signing request requires manual owner approval. All maintainers require MFA. Configure the
-GitHub `signpath-production` environment with a required human reviewer and
-protected main branch, then configure SignPath policies with manual approval.
+Every signing request requires manual owner approval. All maintainers require MFA.
+The GitHub `signpath-production` environment requires the owner as a human
+reviewer, restricts deployment to `main` and disables administrator bypass.
+Self-review is allowed for this single-maintainer project; this is manual owner
+approval, not independent two-person review. Provider policies must separately
+require manual approval. Maintainer MFA is configured. Main requires passing
+build checks; workflow actions are restricted to the exact reviewed revisions.
 Do not treat an AI review as a maintainer identity or a human signing approval.
 
 ## Scope and unresolved eligibility
@@ -36,14 +40,16 @@ Do not treat an AI review as a maintainer identity or a human signing approval.
 read-only repository permissions. It tests and builds unsigned artifacts with no
 signing secrets. No pull_request_target or untrusted branch signing is used.
 
-`sign.yml` is manual only, main only, and requires `SIGNPATH_ENABLED=true` plus
+`sign.yml` is manual only, main only, and requires both `SIGNPATH_ENABLED=true`
+and `SIGNPATH_APPROVED=true` plus
 the protected environment. Every job leading to signing runs on GitHub-hosted
 workers. Actions are pinned to full commits. It:
 
 1. Performs a clean, locked restore/build/tests and publishes the desktop.
 2. Uploads only the two own app binaries as a GitHub workflow artifact.
 3. Requests Foundation signing with the `own-app-binaries` artifact configuration.
-4. Verifies trusted Authenticode identity and timestamp, and packages those signed
+4. Verifies trusted Authenticode status, exact publisher, timestamp, approved
+   certificate SHA256 fingerprint and unchanged product/file versions, and packages those signed
    binaries using pinned Velopack. It does not modify/re-sign upstream files.
 5. Uploads only the generated Setup executable and requests its separate signing.
 6. Verifies Setup's signature/timestamp and hashes the final installer/packages.
@@ -51,13 +57,44 @@ workers. Actions are pinned to full commits. It:
    production website, API, ES256 release feed or addon package.
 
 Owner must configure `SIGNPATH_API_TOKEN` as an environment secret; organization,
-project and app/setup policy slugs are environment/repository variables. No
+project, app/setup policy slugs and `SIGNPATH_CERTIFICATE_SHA256` are repository
+variables. The fingerprint is public certificate metadata, not a private key.
+Obtain it from the provider-approved certificate and verify it out of band;
+never substitute a guessed fingerprint or broad publisher substring. No
 production release/pack private key belongs in GitHub. The existing private
 ES256 release process signs metadata only after final Authenticode bytes exist.
 The provider must review/activate the XML configuration templates in
 `scripts/signpath/`; XML parsing alone is not service acceptance.
 
 ## Acceptance and rollback
+
+Both signing flags are currently `false`. No token, certificate or provider
+account has been provisioned. Keep them off until written provider approval,
+eligibility/privacy decisions and explicit owner activation. Unsigned CI runs
+18 readiness/signature regressions, including missing approval, wrong branch,
+wrong certificate, misleading publisher name, absent timestamp and actual
+unsigned-file rejection. Synthetic certificate fixtures never contact SignPath,
+modify the certificate store or sign a product artifact.
+
+After approval, in order:
+
+1. Resolve provider eligibility, installer privacy and upstream notice questions.
+2. Review the SignPath GitHub App's requested access before installing it for
+   this repository only; do not grant access to the private backup repository.
+3. Have the provider approve the two artifact configurations and manual signing
+   policies. Record the actual organization, slugs and approved certificate pin.
+4. Store the least-privilege token only in `signpath-production`, then record
+   approval. Enable signing only with the owner's separate instruction.
+5. Manually dispatch from `main`, approve the environment and provider requests,
+   verify final signatures and retain artifacts for owner review.
+6. Test fresh install, update from the existing production desktop, addon download,
+   first-run sharing consent, offline/error handling and uninstall in an isolated
+   Windows account/VM before any production release.
+
+`BUILD-PROVENANCE.json` and SHA256SUMS document the final build and bytes; they
+are informational records, not independent signed attestations. The private
+ES256 release feed remains a separate gate and is generated from final signed
+package bytes. The signing workflow never publishes it.
 
 The owner reviewed and approved the desktop-only source and MIT publication.
 Before signing activation: confirm dependency/notices and maintainer MFA; resolve
