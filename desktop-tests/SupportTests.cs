@@ -10,6 +10,19 @@ static class SupportTests
     {
         void Check(bool ok,string reason){if(!ok)throw new Exception(reason);}
         long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();string id=$"fflog-{now}-1-17";
+        var boundaryRequest=new Dictionary<string,object?>{
+            ["schemaVersion"]=1d,["consent"]="support-2026-10-17",["requestID"]=id,["requestedAt"]=(double)now,
+            ["addonVersion"]="0.13.118",["build"]="70450",["redactions"]=new Dictionary<string,object?>{["1"]="Al"},
+            ["events"]=new Dictionary<string,object?>{["1"]=new Dictionary<string,object?>{["t"]=(double)now,["kind"]="scan_status",["data"]=new Dictionary<string,object?>{["message"]="Al "+new string('x',317)}}},
+            ["errors"]=new Dictionary<string,object?>{["1"]=new Dictionary<string,object?>{["message"]="Al "+new string('x',1997),["stack"]="Al "+new string('x',7997),["addon"]="0.13.118",["build"]="70450",["firstAt"]=(double)now,["lastAt"]=(double)now,["count"]=1d}}};
+        string boundaryRaw=SupportLogs.Build(new(){["supportRequest"]=boundaryRequest},"0.1.46",now)!;
+        using(var boundary=JsonDocument.Parse(boundaryRaw)){
+            var boundaryRoot=boundary.RootElement;
+            Check(boundaryRoot.GetProperty("events")[0].GetProperty("data").GetProperty("message").GetString()!.Length==320,"Redacted event exceeds wire limit");
+            Check(boundaryRoot.GetProperty("errors")[0].GetProperty("message").GetString()!.Length==2000&&boundaryRoot.GetProperty("errors")[0].GetProperty("stack").GetString()!.Length==8000,"Redacted error exceeds wire limit");
+            Check(!boundaryRaw.Contains("Al "),"Boundary truncation bypassed name redaction");
+        }
+        File.WriteAllText(Path.Combine(dir,"redaction-boundary.json"),boundaryRaw);
         var db=LuaReader.Read("""
 ForeverFlipDB={["markets"]={["PRIVATE_MARKET"]={["secret"]="NO_FULL_DB"}},["ledgers"]={ ["18:1:110:Classic Beta PvP:Alliance:Otherchar"]={["money"]=99999}},
  ["supportRequest"]={["schemaVersion"]=1,["consent"]="support-2026-10-17",["requestID"]="REQUEST_ID",["requestedAt"]=CLOCK_NOW,["addonVersion"]="0.13.58",["build"]="70450",["debugEnabled"]=true,

@@ -4,7 +4,7 @@ namespace ForeverFlip.Desktop;
 
 // Local-only addon aggregates. Never passed to the market upload serializer.
 public sealed record ProfitDay(long Day,string Strategy,decimal Spent,decimal Made,decimal Profit,long Unknown,long Manual=0);
-public sealed record ProfitStock(string Strategy,decimal Quantity,decimal Cost,decimal Unknown,decimal WipCost=0,decimal Unresolved=0);
+public sealed record ProfitStock(string Strategy,decimal Quantity,decimal Cost,decimal Unknown,decimal WipCost=0,decimal Unresolved=0,decimal ArchivedCost=0);
 public sealed record ProfitBook(string Character,long At,IReadOnlyList<ProfitDay> Days,IReadOnlyList<ProfitStock> Stock,bool LegacyDates=false,bool StockIncomplete=false)
 {
     public static readonly string[] Strategies=["vendor","resale","error","crafting","other"];
@@ -33,7 +33,8 @@ public sealed record ProfitBook(string Character,long At,IReadOnlyList<ProfitDay
                 var q=Number(r.GetValueOrDefault("quantity"));var cost=Number(r.GetValueOrDefault("cost"));var unknown=Number(r.GetValueOrDefault("unknown"));
                 var wip=Number(r.GetValueOrDefault("wipCost"))??0;
                 var unresolved=Number(r.GetValueOrDefault("unresolved"))??0;
-                if(q>=0&&cost>=0&&unknown>=0&&wip>=0&&unresolved>=0)stock.Add(new(strategy,q.Value,cost.Value,unknown.Value,wip,unresolved));
+                var archived=Number(r.GetValueOrDefault("archivedCost"))??0;
+                if(q>=0&&cost>=0&&unknown>=0&&wip>=0&&unresolved>=0&&archived>=0)stock.Add(new(strategy,q.Value,cost.Value,unknown.Value,wip,unresolved,archived));
             }
             books.Add(new(character,(long)at,days,stock,v.GetValueOrDefault("legacyDates") is true,v.GetValueOrDefault("stockIncomplete") is true));
         }
@@ -57,15 +58,15 @@ public sealed record ProfitBook(string Character,long At,IReadOnlyList<ProfitDay
                 rows.Add(new(DateTimeOffset.FromUnixTimeSeconds(group.Key.Day*86400).ToString("yyyy-MM-dd",CultureInfo.InvariantCulture),Name(group.Key.Strategy),group.Sum(r=>r.Spent),group.Sum(r=>r.Made),group.Sum(r=>r.Profit),group.Sum(r=>r.Unknown),0,0,0,Manual:group.Sum(r=>r.Manual)));
         }else foreach(string strategy in Strategies){
             var r=records.Where(x=>x.Strategy==strategy).ToArray();var stock=list.SelectMany(b=>b.Stock).Where(x=>x.Strategy==strategy).ToArray();
-            rows.Add(new("",Name(strategy),r.Sum(x=>x.Spent),r.Sum(x=>x.Made),r.Sum(x=>x.Profit),r.Sum(x=>x.Unknown),stock.Sum(x=>x.Quantity),stock.Sum(x=>x.Cost),stock.Sum(x=>x.Unknown),stock.Sum(x=>x.WipCost),stock.Sum(x=>x.Unresolved),r.Sum(x=>x.Manual)));
+            rows.Add(new("",Name(strategy),r.Sum(x=>x.Spent),r.Sum(x=>x.Made),r.Sum(x=>x.Profit),r.Sum(x=>x.Unknown),stock.Sum(x=>x.Quantity),stock.Sum(x=>x.Cost),stock.Sum(x=>x.Unknown),stock.Sum(x=>x.WipCost),stock.Sum(x=>x.Unresolved),r.Sum(x=>x.Manual),stock.Sum(x=>x.ArchivedCost)));
         }
         return rows;
     }
 }
-public sealed record ProfitDisplayRow(string Day,string Strategy,decimal Spent,decimal Made,decimal Profit,long Unknown,decimal Quantity,decimal Cost,decimal StockUnknown,decimal WipCost=0,decimal Unresolved=0,long Manual=0)
+public sealed record ProfitDisplayRow(string Day,string Strategy,decimal Spent,decimal Made,decimal Profit,long Unknown,decimal Quantity,decimal Cost,decimal StockUnknown,decimal WipCost=0,decimal Unresolved=0,long Manual=0,decimal ArchivedCost=0)
 {
     public string SpentText=>ProfitBook.Money(Spent);
     public string MadeText=>ProfitBook.Money(Made);
     public string ProfitText=>ProfitBook.Money(Profit)+(Unknown>0?" known":"")+(Manual>0?" *":"");
-    public string StockText=>$"{Quantity:0.##} / {ProfitBook.Money(Cost)}"+(WipCost>0?$" + WIP {ProfitBook.Money(WipCost)}":"")+(StockUnknown>0?$"; {StockUnknown:0.##} unpriced":"")+(Unresolved>0?$"; {Unresolved:0.##} unresolved":"");
+    public string StockText=>$"{Quantity:0.##} / {ProfitBook.Money(Cost)}"+(WipCost>0?$" + WIP {ProfitBook.Money(WipCost)}":"")+(ArchivedCost>0?$"; ended batches: {ProfitBook.Money(ArchivedCost)} awaiting allocation":"")+(StockUnknown>0?$"; {StockUnknown:0.##} unpriced":"")+(Unresolved>0?$"; {Unresolved:0.##} unresolved":"");
 }
