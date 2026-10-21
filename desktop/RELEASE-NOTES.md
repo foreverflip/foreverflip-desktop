@@ -1,12 +1,5 @@
-# Desktop 0.1.46-preview.1 - desktop-only source update
+# Desktop 0.1.48-preview.1 - accounting and report fixes
 
-- Added passwordless account sign-in and explicit browser-to-desktop connection,
-  with protected local session storage and sign-out recovery.
-- Require sign-in for shared AI market analysis and authenticated submissions.
-- Preserve existing desktop state before the native installer runs; abort when
-  preservation cannot be verified. Added isolated account and installer tests.
-- The installer contains no addon source. Addon installation and repair use the
-  signed HTTPS feed and retain signature, archive and personal-data safeguards.
-- This source preview remains unsigned. Signing is disabled pending provider
-  approval and separate signed installation/update acceptance. No production
-  feed or executable release is published by this repository's build workflow.
+- Ended incomplete crafting costs can be shown separately from active work, without treating unknown allocations as profit.
+- Support report text is redacted before applying wire length limits.
+- Publisher signing activation, account behavior and sharing consent are unchanged.

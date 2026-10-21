@@ -58,7 +58,11 @@ public static class SupportLogs
         foreach(var key in MarketSync.Sub(db,"ledgers").Keys.Take(200)){
             string last=key.Split(':').Last();if(last.Length>=2)names.Add(last.Split('-')[0]);
         }
-        string Clean(string text,int max)=>Scrub(text.Length>max?text[..max]:text,names);
+        string Clean(string text,int max)
+        {
+            string clean=Scrub(text,names);
+            return clean.Length<=max?clean:string.Concat(clean.EnumerateRunes().Take(max).Select(r=>r.ToString()));
+        }
         bool hasFeedback=request.ContainsKey("reportType")||request.ContainsKey("description");
         if(requestSchema==2&&!hasFeedback)return null;
         string reportType=Str(request,"reportType"),description="";

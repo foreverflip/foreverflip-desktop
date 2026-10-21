@@ -21,6 +21,9 @@ internal static class ProfitTests
         Check(ProfitBook.Money(10001)=="1g 1c"&&ProfitBook.Money(-101)=="-1s 1c"&&ProfitBook.Money(.5m)=="~1c","Money units/sign/weighted approximation changed");
         Check(ProfitBook.Read(LuaReader.Read(Literal("ForeverFlipDB={ledgers={bad={profitView={schema=1,at=999999999999999}}}}" ))).Count==0,"Future/invalid accounting accepted");
         Check(ProfitBook.Read(LuaReader.Read(Literal("ForeverFlipDB={ledgers={}}" ))).Count==0,"Empty save acquired fake profit");
+        string archivedSource="ForeverFlipDB={ledgers={Synthetic={profitView={schema=1,at="+now+",days={},stock={crafting={quantity=0,cost=0,unknown=0,archivedCost=342}}}}}}";
+        var ended=ProfitBook.Rows(ProfitBook.Read(LuaReader.Read(Literal(archivedSource))),1,false,now)[3];
+        Check(ended.ArchivedCost==342&&ended.WipCost==0&&ended.Cost==0&&ended.StockText.Contains("awaiting allocation")&&!ended.StockText.Contains("WIP"),"Archived unresolved basis became active WIP or inventory");
         Console.WriteLine("PASS local profit view: independent totals, UTC daily strategies, current stock, unknown AH evidence, units and empty/invalid data");
     }
     static void Check(bool ok,string why){if(!ok)throw new Exception(why);}
