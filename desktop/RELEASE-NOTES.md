@@ -1,4 +1,4 @@
-# Desktop 0.1.47-preview.1 - accounting and report fixes
+# Desktop 0.1.48-preview.1 - accounting and report fixes
 
 - Ended incomplete crafting costs can be shown separately from active work, without treating unknown allocations as profit.
 - Support report text is redacted before applying wire length limits.
