@@ -110,13 +110,15 @@ internal static class FollowupTests
         var config=new Settings{ClientRoot=root,SavedFile=save,NoticeAccepted=true,ShareMarket=true,ShareCatalog=false};
         config.ItemFingerprints["retired-market|expired-item"]="old fingerprint";
         int posts=0,registrations=0;var sizes=new List<int>();
+        var auth=await VerifiedAccountFixture.SignInAsync(Path.Combine(folder,"account"));
         async Task<HttpResponseMessage> Send(HttpRequestMessage request){
             string path=request.RequestUri!.AbsolutePath;
             if(path=="/api/v1/catalog/sources")return Reply(HttpStatusCode.OK);
-            if(path=="/api/v1/installations"){registrations++;return Reply(HttpStatusCode.OK,new{token="SYNTHETIC_INSTALL_TOKEN"});}
+            // Anonymous registration is no longer an upload credential.
+            if(path=="/api/v1/installations"){registrations++;return Reply(HttpStatusCode.Forbidden);}
             if(path=="/api/v1/observations"){
                 using var body=JsonDocument.Parse(await request.Content!.ReadAsStringAsync());var payload=body.RootElement;
-                Check(request.Headers.Authorization?.Scheme=="Bearer","Observation request omitted bearer authorization");
+                Check(auth.IsCurrentBearer(request),"Observation request omitted the verified account access token");
                 sizes.Add(payload.GetProperty("items").GetArrayLength());posts++;
                 if(posts==2)return Reply(HttpStatusCode.BadGateway);
                 return Reply(HttpStatusCode.OK,new{marketID="ff1-"+Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("forever-beta:beta-2026:18:1:110:Classic Beta PvE:Alliance"))).ToLowerInvariant()[..32],added=payload.GetProperty("items").GetArrayLength()});
@@ -124,14 +126,18 @@ internal static class FollowupTests
             if(path.EndsWith("/pack"))return Reply(HttpStatusCode.NotFound);
             throw new Exception("Unexpected isolated HTTP request "+path);
         }
-        string cache=Path.Combine(folder,"cache");var sync=new MarketSync(config,cache,null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped};
+        string cache=Path.Combine(folder,"cache");var sync=new MarketSync(config,cache,null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped,Account=auth.Account};
         await sync.Tick();Check(sync.State==MarketSyncState.Error&&config.ItemFingerprints.Count==101&&config.LastSignature==""&&config.ItemFingerprints.ContainsKey("retired-market|expired-item"),"Partial failure committed unacknowledged fingerprints, pruned old state or committed the full save signature");
+        Check(auth.Refreshes==0,"A fresh verified access token was renewed before the restart");
+        // Restart: settings and the protected sign-in both come from disk; the reloaded session renews before uploading.
         var persisted=MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json"));
-        sync=new MarketSync(persisted,cache,null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped};
+        var restarted=auth.Reload();Check(restarted.State==AccountState.SignedIn,"Protected sign-in did not survive restart: "+restarted.Status);
+        sync=new MarketSync(persisted,cache,null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped,Account=restarted};
         await sync.Tick();Check(sync.State==MarketSyncState.Synced&&persisted.ItemFingerprints.Count==205&&persisted.LastSignature!=""&&persisted.SavedItemCount==205,"Restart failed to acknowledge exactly all retained observations");
         Check(!persisted.ItemFingerprints.ContainsKey("retired-market|expired-item"),"A fully acknowledged save did not prune retired fingerprint keys");
-        Check(registrations==1&&posts==4&&sizes.SequenceEqual(new[]{100,100,100,5}),"Restart resent acknowledged first batch or lost a later batch");
-        await sync.Tick();Check(posts==4&&!sync.IsBusy,"Unchanged save resent observations or retained the sync gate");
+        Check(registrations==0&&posts==4&&sizes.SequenceEqual(new[]{100,100,100,5}),"Restart resent acknowledged first batch, lost a later batch or registered anonymously");
+        Check(auth.Requests==1&&auth.Refreshes==1,"Restart did not renew the protected sign-in exactly once or requested another sign-in email");
+        await sync.Tick();Check(posts==4&&registrations==0&&!sync.IsBusy,"Unchanged save resent observations, registered anonymously or retained the sync gate");
     }
     static async Task FeedbackFailure(string folder)
     {
@@ -140,25 +146,27 @@ internal static class FollowupTests
         File.WriteAllText(save,"ForeverFlipDB={client={interface=16001,build=\"70450\",addon=\"0.13.112\"},markets={[\""+scope+"\"]={[\"2589:0:0:0\"]={name=\"Linen\",history={{p=20,q=10,t="+now+"}}}}},researchChecks={[\""+scope+"\"]={{id=\"epoch:1\",packID=\"pack1\",recommendationID=\"lead1\",itemKey=\"2589:0:0:0\",strategy=\"resale\",source=\"ai\",startedAt="+(now-1)+",finishedAt="+now+",outcome=\"qualified\"}}}}");
         File.SetLastWriteTimeUtc(save,DateTime.UtcNow.AddSeconds(-30));
         File.WriteAllText(save,ProfitTests.Literal(File.ReadAllText(save)));File.SetLastWriteTimeUtc(save,DateTime.UtcNow.AddSeconds(-30));
-        int feedback=0,packs=0,observations=0;
+        int feedback=0,packs=0,observations=0,registrations=0,unverified=0;
+        var auth=await VerifiedAccountFixture.SignInAsync(Path.Combine(folder,"account"));
         async Task<HttpResponseMessage> Send(HttpRequestMessage request){
             string path=request.RequestUri!.AbsolutePath;
             if(path=="/api/v1/catalog/sources")return Reply(HttpStatusCode.OK,new{capabilities=new{researchFeedback=1}});
-            if(path=="/api/v1/installations")return Reply(HttpStatusCode.OK,new{token="FIXTURE_TOKEN"});
+            if(path=="/api/v1/installations"){registrations++;return Reply(HttpStatusCode.Forbidden);}
             if(path=="/api/v1/observations"){
-                using var body=JsonDocument.Parse(await request.Content!.ReadAsStringAsync());observations++;
+                using var body=JsonDocument.Parse(await request.Content!.ReadAsStringAsync());observations++;if(!auth.IsCurrentBearer(request))unverified++;
                 return Reply(HttpStatusCode.OK,new{marketID="ff1-"+Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("forever-beta:beta-2026:18:1:110:Classic Beta PvE:Alliance"))).ToLowerInvariant()[..32],added=1});
             }
-            if(path=="/api/v1/research/feedback"){feedback++;return Reply(HttpStatusCode.BadRequest);}
+            if(path=="/api/v1/research/feedback"){feedback++;if(!auth.IsCurrentBearer(request))unverified++;return Reply(HttpStatusCode.BadRequest);}
             if(path.EndsWith("/pack")){packs++;return Reply(HttpStatusCode.NotFound);}
             throw new Exception("Unexpected feedback-fixture route "+path);
         }
         var config=new Settings{ClientRoot=root,SavedFile=save,ShareMarket=true,NoticeAccepted=true};
-        var sync=new MarketSync(config,Path.Combine(folder,"cache"),null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped};
+        var sync=new MarketSync(config,Path.Combine(folder,"cache"),null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped,Account=auth.Account};
         await sync.Tick();Check(sync.State==MarketSyncState.Synced&&feedback==1&&packs==1&&observations==1&&config.LastSignature!=""&&config.LastResearchSignature=="",$"Feedback state {sync.State}; status {sync.Status}; feedback {feedback}, packs {packs}, observations {observations}, ack {config.LastResearchSignature}");
         await sync.Tick();Check(feedback==1&&packs==2&&observations==1,"Feedback retry storm or duplicate observations during backoff");
         var field=typeof(MarketSync).GetField("nextResearchFeedbackAt",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
         field.SetValue(sync,DateTime.MinValue);await sync.Tick();Check(feedback==2&&packs==3&&observations==1,"Deferred feedback did not retry without a new game save");
+        Check(registrations==0&&unverified==0,$"Feedback fixture registered anonymously ({registrations}) or uploaded without the verified account token ({unverified})");
     }
     static async Task SupportRoundtrip(string folder)
     {
@@ -166,14 +174,14 @@ internal static class FollowupTests
         string Save(string message)=>"ForeverFlipDB={[\"client\"]={[\"interface\"]=16001,[\"build\"]=\"70450\",[\"addon\"]=\"0.13.73\"},[\"supportRequest\"]={[\"schemaVersion\"]=2,[\"consent\"]=\"support-2026-10-17\",[\"requestID\"]=\""+id+"\",[\"requestedAt\"]="+now+",[\"addonVersion\"]=\"0.13.73\",[\"build\"]=\"70450\",[\"reportType\"]=\"feedback\",[\"description\"]="+MarketSync.LuaString(message)+",[\"events\"]={{[\"t\"]="+now+",[\"kind\"]=\"craft_pause\",[\"data\"]={[\"reason\"]=\"Supplies needed\"}}}}}";
         File.WriteAllText(save,Save("Original feedback: \"雪\" 🙂\nSteps need clarity."));File.SetLastWriteTimeUtc(save,DateTime.UtcNow.AddSeconds(-30));
         int calls=0,registrations=0;string first="";
+        // Support sends with the verified account; signing in does not turn on market sharing.
+        var auth=await VerifiedAccountFixture.SignInAsync(Path.Combine(folder,"account"));
         async Task<HttpResponseMessage> Send(HttpRequestMessage request){
             Check(request.RequestUri!.Scheme=="https","Support request lost HTTPS");
-            if(request.RequestUri.AbsolutePath=="/api/v1/installations"){
-                using var registration=JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
-                Check(!registration.RootElement.GetProperty("marketSharing").GetBoolean()&&registration.RootElement.GetProperty("diagnosticsConsent").GetBoolean(),"Support registration enabled market sharing or omitted explicit diagnostics consent");
-                registrations++;return Reply(HttpStatusCode.OK,new{token="SYNTHETIC_DIAGNOSTIC_TOKEN"});
-            }
+            // No anonymous diagnostics registration: the legacy diagnostics token is unused.
+            if(request.RequestUri.AbsolutePath=="/api/v1/installations"){registrations++;return Reply(HttpStatusCode.Forbidden);}
             Check(request.RequestUri.AbsolutePath=="/api/v1/support/reports","Sharing-off tick attempted market/catalog HTTP");
+            Check(auth.IsCurrentBearer(request),"Support report omitted the verified account access token");
             string raw=await request.Content!.ReadAsStringAsync();calls++;
             using var report=JsonDocument.Parse(raw);Check(report.RootElement.GetProperty("schemaVersion").GetInt32()==1&&report.RootElement.GetProperty("reportType").GetString()=="feedback"&&report.RootElement.GetProperty("description").GetString()!.Contains("雪"),"Saved support v2 did not preserve type/Unicode context on wire v1");
             if(calls==1){first=raw;return Reply(HttpStatusCode.BadGateway);}
@@ -181,15 +189,16 @@ internal static class FollowupTests
             return Reply(HttpStatusCode.OK,new{reportID=new string('a',64),requestID=id,receivedAt=now});
         }
         var config=new Settings{ClientRoot=root,SavedFile=save,NoticeAccepted=true,ShareMarket=false,ShareCatalog=false};
-        var sync=new MarketSync(config,Path.Combine(folder,"cache"),null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped};
+        var sync=new MarketSync(config,Path.Combine(folder,"cache"),null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped,Account=auth.Account};
         await sync.Tick();Check(sync.State==MarketSyncState.SharingOff&&sync.SupportStatus.Contains("waiting")&&calls==1,"Support failure prevented the sharing-off tick or lost the queued report");
         File.WriteAllText(save,Save("Changed feedback with the same request ID"));File.SetLastWriteTimeUtc(save,DateTime.UtcNow.AddSeconds(-30));
         string key=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(save).ToUpperInvariant()))).ToLowerInvariant()[..24];
         string stateFile=Path.Combine(MarketSync.StateRoot,"support",key,"state.json");
         var state=System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(stateFile))!;state["NextAttempt"]=0;File.WriteAllText(stateFile,state.ToJsonString());
-        sync=new MarketSync(MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json")),Path.Combine(folder,"cache"),null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped};
-        await sync.Tick();Check(calls==2&&registrations==1&&sync.SupportStatus.StartsWith("Report sent")&&!sync.Config.ShareMarket&&sync.Config.ProtectedToken=="","Support retry/receipt changed sharing credentials or missed persisted diagnostics token");
-        await sync.Tick();Check(calls==2,"An acknowledged support request was uploaded again");
+        sync=new MarketSync(MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json")),Path.Combine(folder,"cache"),null,new Handler(Send)){SaveProcessProbe=_=>GameSaveState.Stopped,Account=auth.Reload()};
+        await sync.Tick();Check(calls==2&&registrations==0&&sync.SupportStatus.StartsWith("Report sent")&&!sync.Config.ShareMarket&&sync.Config.ProtectedToken==""&&sync.Config.ProtectedDiagnosticsToken=="","Support retry/receipt changed sharing, registered anonymously or created a legacy token");
+        Check(auth.Requests==1&&auth.Refreshes==1,"Restarted support retry did not renew the protected sign-in exactly once");
+        await sync.Tick();Check(calls==2&&registrations==0,"An acknowledged support request was uploaded again");
     }
     static async Task ExportContracts(string folder)
     {

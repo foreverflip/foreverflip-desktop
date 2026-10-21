@@ -152,7 +152,7 @@ public sealed class SupportOutbox(string folder)
         }
     }
     void Save(State s){MarketSync.Atomic(Path.Combine(folder,"state.json"),JsonSerializer.Serialize(s));Status=s.Message;}
-    public async Task Process(Dictionary<string,object?> db,string version,Func<string,Task<JsonDocument>> post,long? clock=null)
+    public async Task Process(Dictionary<string,object?> db,string version,Func<string,Task<JsonDocument>> post,long? clock=null,string? blocked=null)
     {
         long now=clock??DateTimeOffset.UtcNow.ToUnixTimeSeconds();Directory.CreateDirectory(folder);var state=Load();Status=state.Message;
         string? raw=SupportLogs.Build(db,version,now);
@@ -162,7 +162,10 @@ public sealed class SupportOutbox(string folder)
             if(!state.Delivered.ContainsKey(id)&&!File.Exists(file)&&Directory.EnumerateFiles(folder,"*.report.json").Count()<3)MarketSync.Atomic(file,raw);
         }
         var files=Directory.EnumerateFiles(folder,"*.report.json").OrderBy(File.GetCreationTimeUtc).ToArray();
-        if(files.Length==0||state.NextAttempt>now)return;
+        if(files.Length==0)return;
+        // Waiting for sign-in is not a delivery failure: keep the report and its backoff unchanged.
+        if(blocked!=null){Status=blocked;return;}
+        if(state.NextAttempt>now)return;
         string pending=files[0];raw=File.ReadAllText(pending);string requestID;long requestedAt;
         try{
             if(Encoding.UTF8.GetByteCount(raw)>SupportLogs.MaxBytes)throw new InvalidDataException("Local support report exceeds its limit.");

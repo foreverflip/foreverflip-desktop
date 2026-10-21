@@ -20,28 +20,55 @@ public static class Program
     {
         // Apply only through our signed, persisted attempt path. The SDK's default
         // startup auto-apply bypasses failure backoff and can trap users in a loop.
-        VelopackApp.Build().SetAutoApplyOnStartup(false).Run();
-        using var single=new Mutex(true,"Local\\ForeverFlipDesktop",out bool first);if(!first)return;
+        VelopackApp.Build().SetAutoApplyOnStartup(false)
+            .OnAfterInstallFastCallback(_=>DesktopActivation.Register(true))
+            .OnAfterUpdateFastCallback(_=>{DesktopState.RecordUpdate();DesktopActivation.Register(true);})
+            .OnBeforeUninstallFastCallback(_=>DesktopActivation.Unregister()).Run();
+        // Setup's automatic first launch must wait for the outer preservation gate.
+        if(InstallerPreflight.InstallInProgress)return;
+        string? activationUrl=args.Length==1&&DesktopActivation.Parse(args[0])!=null?args[0]:null;
+        // Invalid protocol input never starts a new sign-in or an inspection command.
+        if(args.Any(a=>a.Contains("://",StringComparison.Ordinal))&&activationUrl==null)return;
+        using var single=new Mutex(true,"Local\\ForeverFlipDesktop",out bool first);
+        if(!first){if(!DesktopActivation.Forward(activationUrl??"us.blahh.foreverflip://open"))System.Windows.MessageBox.Show("ForeverFlip could not be brought forward. Open it from the system tray, or close and reopen it, then try again.","ForeverFlip");return;}
         if(args.Length>=2&&args[0]=="--inspect"){
             try{var batches=MarketSync.BuildBatches(args[1]);string output=args.Length>2?args[2]:Path.Combine(MarketSync.StateRoot,"inspection.json");MarketSync.Atomic(output,JsonSerializer.Serialize(batches));}catch(Exception e){MarketSync.Log(e.Message);Environment.ExitCode=1;}return;
         }
-        Directory.CreateDirectory(MarketSync.StateRoot);
+        try{
+            DesktopState.MigrateDefault();
+            Directory.CreateDirectory(MarketSync.StateRoot);
+        }catch(Exception ex) when(ex is DesktopStateMigrationException or IOException or UnauthorizedAccessException or System.Security.SecurityException){
+            System.Windows.MessageBox.Show("ForeverFlip could not preserve your saved settings while moving them to a safe data folder. Nothing was replaced. Close the app and try again, or contact support. ("+ex.GetType().Name+")","ForeverFlip");
+            Environment.ExitCode=1;return;
+        }
         Environment.CurrentDirectory=MarketSync.StateRoot;
-        var app=new System.Windows.Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};var window=new MainWindow();app.Run(window);
+        var app=new System.Windows.Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};var window=new MainWindow();
+        using var activationStop=new CancellationTokenSource();
+        _=DesktopActivation.Listen(a=>window.Dispatcher.InvokeAsync(()=>window.HandleActivation(a)),activationStop.Token);
+        // Install hooks cover new installs/updates; repair the handler on normal installed startup.
+        if(new UpdateManager(new SignedUpdateSource()).IsInstalled){try{DesktopActivation.Register();}catch(Exception ex) when(ex is UnauthorizedAccessException or System.Security.SecurityException){MarketSync.Log("App link registration unavailable.");}}
+        if(activationUrl!=null)window.Loaded+=async(_,_)=>await window.HandleActivation(DesktopActivation.Parse(activationUrl)!);
+        app.Run(window);activationStop.Cancel();
     }
 }
 
 public sealed partial class MainWindow:System.Windows.Window
 {
     readonly MarketSync sync;
+    readonly AccountSession account;
     readonly Forms.NotifyIcon tray;
     readonly DispatcherTimer timer=new(){Interval=TimeSpan.FromSeconds(30)};
+    // Sign-in polling is independent of game setup and runs only while a link is pending.
+    readonly DispatcherTimer accountTimer=new(){Interval=TimeSpan.FromSeconds(5)};
+    AccountState shownAccountState;
     readonly DesktopUpdateAttempt updateAttempt=new(Path.Combine(MarketSync.StateRoot,"desktop-update-attempt.json"));
     bool quitting,checkingUpdates;
     DateTime nextUpdate=DateTime.MinValue;
     public MainWindow(bool preview=false,MarketSync? syncOverride=null)
     {
         sync=syncOverride??new MarketSync();InitializeComponent();
+        OverviewPage.SizeChanged+=(_,_)=>CompactHome();
+        account=sync.Account??=new AccountSession(Path.Combine(MarketSync.StateRoot,"account.json"));shownAccountState=account.State;
         // Fit the initial window to the available desktop in WPF device-independent units.
         var workArea=SystemParameters.WorkArea;
         MinWidth=Math.Min(MinWidth,Math.Max(320,workArea.Width-24));
@@ -55,8 +82,8 @@ public sealed partial class MainWindow:System.Windows.Window
         SyncButton.Click+=async(_,_)=>await SyncNow();
         MarketButton.Click+=(_,_)=>Open(MarketSync.Service+"/market/");
         UpdateButton.Click+=async(_,_)=>{
-            if(!sync.Config.NoticeAccepted){Notice();Render();if(sync.Config.NoticeAccepted)await SyncNow();}
-            else if(string.IsNullOrEmpty(sync.Config.ClientRoot))ChooseClient();else await UpdateAddonNow();
+            if(!sync.Config.NoticeAccepted){Notice();Render();if(!sync.Config.NoticeAccepted)return;}
+            if(string.IsNullOrEmpty(sync.Config.ClientRoot))ChooseClient();else await UpdateAddonNow();
         };
         SettingsUpdateButton.Click+=async(_,_)=>await Updates();
         ResearchStatusButton.Click+=(_,_)=>{ShowPage("settings");TechnicalStatus.IsExpanded=true;packStatus.BringIntoView();};
@@ -72,14 +99,35 @@ public sealed partial class MainWindow:System.Windows.Window
                 if(startup.IsChecked==true)key.SetValue("ForeverFlip","\""+Environment.ProcessPath+"\" --tray");else key.DeleteValue("ForeverFlip",false);
                 sync.Config.StartWithWindows=startup.IsChecked==true;sync.Save();}catch(Exception e){System.Windows.MessageBox.Show(e.Message);}
         };
+        SendSignInButton.Click+=async(_,_)=>await RequestSignIn();
+        HomeSignInButton.Click+=async(_,_)=>await RequestSignIn();
+        HomeReopenButton.Click+=(_,_)=>{OpenSignInPage();Render();};
+        HomeCancelButton.Click+=async(_,_)=>{await account.CancelPendingAsync();Render();};
+        AccountMoreButton.Click+=(_,_)=>{AccountMoreButton.ContextMenu.PlacementTarget=AccountMoreButton;AccountMoreButton.ContextMenu.IsOpen=true;};
+        ReopenSignInButton.Click+=(_,_)=>{OpenSignInPage();Render();};
+        CancelSignInButton.Click+=async(_,_)=>{await account.CancelPendingAsync();Render();};
+        SignOutButton.Click+=async(_,_)=>{await account.SignOutAsync(false);Render();};
+        SignOutAllButton.Click+=async(_,_)=>{
+            if(System.Windows.MessageBox.Show(this,"Sign out ForeverFlip on every device and the website?","Sign out all devices",MessageBoxButton.YesNo,MessageBoxImage.Question)!=MessageBoxResult.Yes)return;
+            await account.SignOutAsync(true);Render();
+        };
+        ForgetAccountButton.Click+=async(_,_)=>{
+            if(System.Windows.MessageBox.Show(this,"Remove the sign-in from this PC without revoking it on the server? The server session stays valid until it expires or you sign out all devices from the website.","Remove from this PC only",MessageBoxButton.YesNo,MessageBoxImage.Warning)!=MessageBoxResult.Yes)return;
+            await account.ForgetLocalAsync();Render();
+        };
+        AccountStatusButton.Click+=(_,_)=>{ShowPage("settings");accountLine.BringIntoView();};
         if(preview){tray=new Forms.NotifyIcon();Closed+=(_,_)=>tray.Dispose();Render();return;}
+        account.Changed+=()=>Dispatcher.InvokeAsync(AccountChanged);
+        accountTimer.Tick+=async(_,_)=>await account.PollAsync();
+        if(account.State==AccountState.Pending)accountTimer.Start();
         tray=new Forms.NotifyIcon{Text="Forever Flip",Icon=System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!),Visible=true};
         var menu=new Forms.ContextMenuStrip();menu.Items.Add("Open Forever Flip",null,(_,_)=>Dispatcher.Invoke(()=>{Show();Activate();}));
         menu.Items.Add("Sync now",null,async(_,_)=>await SyncNow());menu.Items.Add("Exit",null,(_,_)=>Dispatcher.Invoke(()=>{quitting=true;Close();}));tray.ContextMenuStrip=menu;
         tray.DoubleClick+=(_,_)=>Dispatcher.Invoke(()=>{Show();Activate();});
         Closing+=(_,e)=>{if(!quitting){e.Cancel=true;Hide();}else{tray.Dispose();System.Windows.Application.Current.Shutdown();}};
-        sync.Changed+=()=>Dispatcher.Invoke(Render);timer.Tick+=async(_,_)=>{await SyncNow();if(DateTime.UtcNow>=nextUpdate)await Updates(false);};
-        Loaded+=async(_,_)=>{if(!sync.Config.NoticeAccepted)Notice();
+        sync.Changed+=()=>Dispatcher.Invoke(Render);timer.Tick+=async(_,_)=>{_ = account.RefreshAvailabilityAsync();_ = account.MaintainAsync();await SyncNow();if(DateTime.UtcNow>=nextUpdate)await Updates(false);};
+        Activated+=(_,_)=>{_ = account.RefreshAvailabilityAsync();};
+        Loaded+=async(_,_)=>{_ = account.RefreshAvailabilityAsync();_ = account.MaintainAsync();
             if(sync.Config.NoticeAccepted&&string.IsNullOrEmpty(sync.Config.ClientRoot)){
                 var clients=await Task.Run(ClientInstall.Discover);
                 if(clients.Count==1)SelectClient(clients[0]);
@@ -91,6 +139,79 @@ public sealed partial class MainWindow:System.Windows.Window
     }
     static SolidColorBrush Brush(string hex)=>new((Color)ColorConverter.ConvertFromString(hex));
     Task SyncNow()=>checkingUpdates?Task.CompletedTask:sync.Tick();
+    async Task RequestSignIn()
+    {
+        // The browser owns the email form; this PC keeps the redemption proof.
+        if(await account.RequestConnectAsync()){accountTimer.Start();OpenSignInPage();}
+        Render();
+    }
+    public async Task HandleActivation(DesktopActivation activation)
+    {
+        Show();if(WindowState==WindowState.Minimized)WindowState=WindowState.Normal;Activate();
+        if(activation.Action=="open")return;
+        ShowPage("overview");
+        if(activation.Action=="sign-in"){
+            if(account.State==AccountState.SignedOut)await RequestSignIn();
+            else if(account.State==AccountState.Pending)OpenSignInPage();
+        }else if(activation.Action=="pair-done")await account.CompleteConnectionAsync(activation);
+        Render();
+    }
+    void OpenSignInPage()
+    {
+        // Only the app-built fixed-origin URL; a failed launch keeps the pending request for reopening.
+        if(account.PendingVerificationUrl is not string url)return;
+        try{Open(url);}
+        catch(Exception ex) when(ex is System.ComponentModel.Win32Exception or InvalidOperationException or PlatformNotSupportedException or FileNotFoundException){account.ReportBrowserOpenFailed();}
+    }
+    void AccountChanged()
+    {
+        var state=account.State;
+        if(state==AccountState.Pending)accountTimer.Start();else accountTimer.Stop();
+        // A new sign-in resumes paused uploads now instead of at the next 30-second tick.
+        if(state==AccountState.SignedIn&&shownAccountState!=AccountState.SignedIn)_ = SyncNow();
+        if(state==AccountState.SignedOut&&shownAccountState==AccountState.SignedIn)_ = SyncNow();
+        shownAccountState=state;Render();
+    }
+    void RenderAccount()
+    {
+        var state=account.State;bool idle=!account.IsBusy;
+        accountStatus.Text=account.Status;
+        accountLine.ToolTip="Shared submissions are linked privately to your account for abuse prevention. Recent IP/security records are retained for up to 30 days. Local bookkeeping stays available without sign-in.";
+        SendSignInButton.Visibility=HomeSignInButton.Visibility=state==AccountState.SignedOut?Visibility.Visible:Visibility.Collapsed;
+        CancelSignInButton.Visibility=state==AccountState.Pending?Visibility.Visible:Visibility.Collapsed;
+        ReopenSignInButton.Visibility=state==AccountState.Pending&&account.PendingVerificationUrl!=null?Visibility.Visible:Visibility.Collapsed;
+        HomeReopenButton.Visibility=ReopenSignInButton.Visibility;HomeCancelButton.Visibility=CancelSignInButton.Visibility;
+        SignOutButton.Visibility=AccountMoreButton.Visibility=state==AccountState.SignedIn?Visibility.Visible:Visibility.Collapsed;
+        ForgetAccountButton.Visibility=state==AccountState.SignedIn&&account.SignOutFailed?Visibility.Visible:Visibility.Collapsed;
+        HomeSignInButton.IsEnabled=HomeReopenButton.IsEnabled=HomeCancelButton.IsEnabled=SendSignInButton.IsEnabled=ReopenSignInButton.IsEnabled=CancelSignInButton.IsEnabled=SignOutButton.IsEnabled=SignOutAllButton.IsEnabled=ForgetAccountButton.IsEnabled=idle;
+        accountIndicator.Text=state switch{
+            AccountState.SignedIn=>(account.NetworkProblem?"Account offline · ":"Signed in · ")+account.Email,
+            AccountState.Pending=>account.PendingEmailSent?"Sign-in link sent · waiting for confirmation":"Finish sign-in in your browser",
+            _=>"Sign in"};
+        accountIndicator.Foreground=Brush(state==AccountState.SignedIn&&!account.NetworkProblem?"#BED2A3":"#DEC182");
+        AccountHeroTitle.Text=state switch{AccountState.SignedIn=>"Your AI market analysis",AccountState.Pending=>"Connect this app on the website",_=>"Sign in to unlock AI market analysis"};
+        AccountHeroDetail.Text=state==AccountState.SignedIn?account.NetworkProblem?"Your account is offline. Retrying automatically.":"Signed in as "+account.Email+". Analysis syncs automatically when available.":state==AccountState.Pending?account.Status:"One email link. No password. Your app and website stay connected.";
+        ConnectionSteps.Text=account.ConnectionProgress;ConnectionSteps.Visibility=state==AccountState.Pending?Visibility.Visible:Visibility.Collapsed;
+        ResearchStatusButton.Visibility=state==AccountState.SignedIn?Visibility.Visible:Visibility.Collapsed;
+        HomeRegistration.Text=SettingsRegistration.Text=(account.RegistrationOpen==true?"● ":account.RegistrationOpen==false?"● ":"○ ")+account.RegistrationStatus;
+        HomeRegistration.Foreground=SettingsRegistration.Foreground=Brush(account.RegistrationOpen==true?"#AFCB9A":account.RegistrationOpen==false?"#E4A69B":"#ADB5A1");
+        HomeRegistration.Visibility=SettingsRegistration.Visibility=state==AccountState.SignedOut?Visibility.Visible:Visibility.Collapsed;
+        // Keep account errors visible on Home; do not hide them in Settings or a tooltip.
+        if(state==AccountState.SignedOut&&!account.Status.StartsWith("Sign in to unlock",StringComparison.Ordinal))AccountHeroDetail.Text=account.Status;
+        if(account.ConnectionNotice!="")AccountHeroDetail.Text=account.ConnectionNotice;
+        HomeSignInButton.Content=account.ConnectionNotice!=""&&state==AccountState.SignedOut?"Try again":"Sign in";
+    }
+    void CompactHome()
+    {
+        bool compact=OverviewPage.ActualWidth<650||OverviewPage.ActualHeight<390;
+        AccountHero.Padding=compact?new Thickness(12,8,12,8):new Thickness(16,14,16,14);
+        AccountHeroTitle.FontSize=compact?19:22;
+        AccountHeroDetail.Margin=compact?new Thickness(0,4,0,5):new Thickness(0,5,0,8);
+        HomeRegistration.Margin=compact?new Thickness(0,6,0,0):new Thickness(0,9,0,0);
+        CompactSavedStatus.Margin=new Thickness(0,0,0,6);
+        SavedDataGrid.Visibility=compact?Visibility.Collapsed:Visibility.Visible;
+        CompactSavedStatus.Visibility=compact?Visibility.Visible:Visibility.Collapsed;
+    }
     void ShowPage(string page)
     {
         OverviewPage.Visibility=page=="overview"?Visibility.Visible:Visibility.Collapsed;
@@ -149,7 +270,7 @@ public sealed partial class MainWindow:System.Windows.Window
     static void Open(string target)=>Process.Start(ExternalLinks.StartInfo(target));
     void Render()
     {
-        RenderProfit();
+        RenderProfit();RenderAccount();
         pathStatus.Text=string.IsNullOrEmpty(sync.Config.ClientRoot)?"No WoW client selected":sync.Config.ClientRoot;
         string appVersion=typeof(Program).Assembly.GetName().Version?.ToString(3)??"Unknown";
         string addon=AddonVersion().Replace("## Version:","").Trim();
@@ -164,12 +285,15 @@ public sealed partial class MainWindow:System.Windows.Window
         marketStatus.Text=sync.Config.MarketLabel==""?"WoW Forever beta":sync.Config.MarketLabel;
         itemCount.Text=sync.Config.SavedItemCount?.ToString("N0")??"—";
         observationCount.Text=sync.Config.SavedObservationCount?.ToString("N0")??"—";
-        sharingStatus.Text=sync.Config.ShareMarket?"Market sharing enabled":"Market sharing off";
-        sharingStatus.Foreground=Brush(sync.Config.ShareMarket?"#BED2A3":"#ADB5A1");
+        CompactSavedStatus.Text="Saved "+sync.SavedStatus+" · Upload "+(sync.Config.LastUploaded==""?"none yet":sync.Config.LastUploaded)+"\n"+itemCount.Text+" items · "+observationCount.Text+" prices on this PC";
+        bool signedIn=account.State==AccountState.SignedIn;
+        sharingStatus.Text=!sync.Config.ShareMarket?"Market sharing off":signedIn?"Market sharing enabled":"Market sharing on · paused until sign-in";
+        sharingStatus.Foreground=Brush(sync.Config.ShareMarket&&signedIn?"#BED2A3":"#ADB5A1");
         statusHeadline.Text=sync.State switch{
             MarketSyncState.Synced=>"Saved scans are up to date",MarketSyncState.Reading=>"Reading your saved scans",
             MarketSyncState.Uploading=>"Uploading market observations",MarketSyncState.SharingOff=>"Market sharing is off",
-            MarketSyncState.Waiting=>"Waiting for the game save",MarketSyncState.Error=>"Sync needs attention",_=>"Let’s connect your game"};
+            MarketSyncState.Waiting=>"Waiting for the game save",MarketSyncState.Error=>"Sync needs attention",
+            MarketSyncState.SignInRequired=>"Sign in to share your scans",_=>"Let’s connect your game"};
         overviewSyncStatus.Text=sync.State==MarketSyncState.Synced?"New scans sync automatically after /reload or logging out.":sync.Status;
         syncBadge.Text=sync.State==MarketSyncState.Synced?"✓":sync.State==MarketSyncState.Error?"!":"•";
         syncBadge.Foreground=Brush(sync.State==MarketSyncState.Error?"#E8BF77":"#BED2A3");
@@ -182,7 +306,7 @@ public sealed partial class MainWindow:System.Windows.Window
         SettingsUpdateButton.IsEnabled=!checkingUpdates&&!sync.IsBusy&&sync.Config.NoticeAccepted;
         ChooseFolderButton.IsEnabled=!checkingUpdates&&!sync.IsBusy;
         RepairButton.IsEnabled=!checkingUpdates&&!sync.IsBusy;
-        sharing.ToolTip="Share auction observations, recipe definitions, vendor supplies and anonymous native check outcomes. Personal transactions, names, bags and balances stay local.";
+        sharing.ToolTip="Share auction observations, recipe definitions, vendor supplies and native check outcomes. Shared submissions are linked privately to your account to enforce limits. Personal transactions, character names, bags and balances stay local.";
     }
     string AddonVersion(){try{return File.ReadLines(Path.Combine(sync.Config.ClientRoot,"Interface","AddOns","ForeverFlip","ForeverFlip.toc")).First(l=>l.StartsWith("## Version:"));}catch{return "Addon not installed";}}
     void Notice()
@@ -190,7 +314,7 @@ public sealed partial class MainWindow:System.Windows.Window
         var notice=new System.Windows.Window{Owner=this,Title="Forever Flip — data sharing",Width=550,Height=480,MinWidth=460,MinHeight=350,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Background,Foreground=Foreground,FontFamily=FontFamily,Resources=Resources};
         var stack=new StackPanel{Margin=new Thickness(24)};stack.Children.Add(new TextBlock{Text="Build a better market picture",FontSize=23,Foreground=Brush("#F4BD50")});
         stack.Children.Add(Label("After you continue, the app can upload auction prices, stock, timestamps, recipe definitions, pattern descriptions and vendor supply prices to forever.blahh.us.","#F7F4EE"));
-        stack.Children.Add(Label("Anonymous check outcomes tell us whether researched and ordinary items reached Ready: buy, failed a check or could not be read. These reports improve research priorities. They are not purchases, sales or profit records.","#BBC0CA"));
+        stack.Children.Add(Label("Check outcomes tell us whether researched and ordinary items reached Ready: buy, failed a check or could not be read. They are not purchases, sales or profit records. Shared submissions are linked privately to your email account for abuse prevention; recent IP/security records are retained for up to 30 days.","#BBC0CA"));
         var choice=new CheckBox{Content="Share market data",Foreground=Foreground,IsChecked=sync.Config.ShareMarket,Margin=new Thickness(0,12,0,14)};stack.Children.Add(choice);
         stack.Children.Add(Label("Names, account paths, bag quantities, balances and personal transactions stay local. You can turn sharing off in Settings; downloads remain available. Report issue / feedback in the addon is a separate, explicitly submitted private support report.","#ADB5A1"));
         stack.Children.Add(Button("Continue",()=>{sync.Config.ShareMarket=choice.IsChecked==true;sync.Config.NoticeAccepted=true;sync.Config.ShareCatalog=sync.Config.ShareMarket;sync.Config.CatalogNoticeAccepted=true;sharing.IsChecked=sync.Config.ShareMarket;sync.Config.LastSignature="";sync.Save();notice.DialogResult=true;}));

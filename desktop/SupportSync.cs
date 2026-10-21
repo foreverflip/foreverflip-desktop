@@ -25,16 +25,13 @@ public sealed partial class MarketSync
             }
             string key=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(Config.SavedFile).ToUpperInvariant()))).ToLowerInvariant()[..24];
             var queue=new SupportOutbox(Path.Combine(StateRoot,"support",key));
+            // The in-game request remains the only consent. Signing in neither
+            // creates nor sends a report; a signed-out report waits on disk.
+            string? blocked=SignedIn?null:"Report saved on this PC and waiting. Sign in under Settings → Account to send it; signing in does not turn on market sharing.";
             await queue.Process(supportDB,typeof(Program).Assembly.GetName().Version!.ToString(3),async raw=>{
-                string protectedToken=Config.ProtectedDiagnosticsToken!=""?Config.ProtectedDiagnosticsToken:Config.ProtectedToken;
-                if(protectedToken==""){
-                    using var registration=await Post("/api/v1/installations",new{noticeVersion="2026-10-14",marketSharing=false,diagnosticsConsent=true});
-                    protectedToken=Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(registration.RootElement.GetProperty("token").GetString()!),null,DataProtectionScope.CurrentUser));
-                    Config.ProtectedDiagnosticsToken=protectedToken;Save();
-                }
-                string token=Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(protectedToken),null,DataProtectionScope.CurrentUser));
+                string token=(Account==null?null:await Account.AccessTokenAsync())??throw new MarketServiceException("Sign in under Settings → Account to send the saved report.");
                 using var body=JsonDocument.Parse(raw);return await Post("/api/v1/support/reports",body.RootElement,token);
-            });
+            },blocked:blocked);
             SupportStatus=queue.Status;
         }catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or InvalidDataException or JsonException or CryptographicException or FormatException){
             SupportStatus="Report could not be prepared. Keep the desktop app open and make a new game save.";

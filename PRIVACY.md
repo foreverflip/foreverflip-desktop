@@ -12,8 +12,10 @@ data includes item identifiers, asking prices/stock/times, recipes, observed
 vendor supplies and anonymous check outcomes. These are observations and
 untrusted feedback, not proof of sales or profit. Normal market uploads exclude
 account paths, character names, balances and personal purchase/sale ledgers.
-The service receives ordinary connection metadata and a per-installation
-registration credential. No personal game credentials are requested.
+Passwordless sign-in uses your email address. The service stores account,
+session and IP/security records to enforce registration and abuse limits.
+AI downloads and enabled uploads require sign-in; sharing remains optional.
+No personal game credentials are requested.
 
 Private support reports are separate: an explicit addon issue/feedback submission
 requests the diagnostic upload. They can include error text, settings and
@@ -21,8 +23,13 @@ transaction amounts, are private, and are retained for up to30 days. Do not put
 personal details into report text. Turning market sharing off does not disable
 an explicitly submitted support report or the app's update/research downloads.
 
-Local settings, protected registration credentials, cache and diagnostic logs are
-stored under the user's local application-data folder. The application reads the
+Local settings, Windows-user-encrypted sign-in state, cache and diagnostic logs
+are stored under the user's local application-data folder, outside the installer
+directory. Installation recovery can retain encrypted copies of older sign-in
+state. Local-only removal clears the active sign-in without revoking the server
+session or erasing recovery copies. Use normal sign-out, or the website's
+sign-out-all-devices action, to revoke the session. Uninstall can retain local
+settings and recovery data. The application reads the
 selected game's saved addon file without executing Lua. Private bookkeeping is
 displayed locally. Code replacement retains addon backups and preserves saved
 game data. No game input or automated reload is sent by this companion.

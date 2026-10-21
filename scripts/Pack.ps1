@@ -15,4 +15,10 @@ try{
  # binaries retain upstream signatures (or remain unsigned); do not re-sign them.
  & dotnet tool run vpk -- pack --packId ForeverFlip --packVersion $Version --packDir $app --mainExe ForeverFlip.exe --packAuthors ForeverFlip --packTitle 'ForeverFlip Desktop' --icon desktop/Assets/ForeverFlip-Setup.ico --splashImage artifacts/installer-art/Setup.png --outputDir artifacts/releases --releaseNotes desktop/RELEASE-NOTES.md --runtime win-x64
  if($LASTEXITCODE){throw 'Packaging failed'}
+ # The raw SDK Setup may delete the previous install even if its hook fails.
+ # Keep it private; the downloadable Setup first preserves legacy app state.
+ $private=Join-Path $root 'artifacts/native-installer';New-Item -ItemType Directory -Path $private -Force|Out-Null
+ $native=Join-Path $private ('NativeSetup-'+[Guid]::NewGuid().ToString('N')+'.exe')
+ Move-Item -LiteralPath artifacts/releases/ForeverFlip-win-Setup.exe -Destination $native
+ & "$PSScriptRoot/Prepare-Installer.ps1" -NativeSetup $native -OutputFile "$root/artifacts/releases/ForeverFlip-win-Setup.exe" -Version $Version
 }finally{Pop-Location}

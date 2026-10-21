@@ -10,7 +10,7 @@ using System.Text.RegularExpressions;
 
 namespace ForeverFlip.Desktop;
 
-public enum MarketSyncState {NeedsSetup,Waiting,Reading,Uploading,Synced,SharingOff,Error}
+public enum MarketSyncState {NeedsSetup,Waiting,Reading,Uploading,Synced,SharingOff,Error,SignInRequired}
 public enum ResearchAvailability {None,Downloaded,Ready,Loaded,Expired,Scheduled}
 public sealed record ResearchPack(long CreatedAt,long ExpiresAt,bool Staged,string PackID,string Scope);
 public sealed class MarketServiceException(string message,HttpStatusCode? statusCode=null,TimeSpan? retryAfter=null):Exception(message)
@@ -50,6 +50,8 @@ public sealed class Settings
     public bool StartWithWindows {get;set;}
     public bool PendingAddonInstall {get;set;}
     public bool PendingAddonRepair {get;set;}
+    // Legacy anonymous installation tokens: kept readable for downgrade
+    // compatibility, never used for uploads and never treated as signed in.
     public string ProtectedToken {get;set;}="";
     public string ProtectedDiagnosticsToken {get;set;}="";
     public string LastSignature {get;set;}="";
@@ -83,7 +85,8 @@ public sealed partial class MarketSync
     DateTime nextResearchFeedbackAt=DateTime.MinValue;
     string researchFeedbackWarning="";
     public const string Service="https://forever.blahh.us";
-    static readonly string DefaultStateRoot=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ForeverFlip");
+    // Outside the Velopack install root, which Setup may rename or replace.
+    static readonly string DefaultStateRoot=DesktopState.DefaultRoot;
     internal static string? TestStateRoot {get;set;}
     public static string StateRoot=>TestStateRoot??DefaultStateRoot;
     public Settings Config {get;}
@@ -113,22 +116,28 @@ public sealed partial class MarketSync
             pack.PackID==Config.LoadedPack&&pack.Scope==Config.LoadedPackScope);
     }
     // The addon acknowledges the last character's market, not every market retained in the account database.
-    public bool PackLoadConfirmed=>Config.MarketIDs.Any(m=>Phase(m)==ResearchAvailability.Loaded);
-    public bool ResearchPending=>!PackLoadConfirmed&&Config.MarketIDs.Any(m=>Phase(m) is ResearchAvailability.Downloaded or ResearchAvailability.Ready or ResearchAvailability.Scheduled);
+    public bool PackLoadConfirmed=>SignedIn&&Config.MarketIDs.Any(m=>Phase(m)==ResearchAvailability.Loaded);
+    public bool ResearchPending=>SignedIn&&!PackLoadConfirmed&&Config.MarketIDs.Any(m=>Phase(m) is ResearchAvailability.Downloaded or ResearchAvailability.Ready or ResearchAvailability.Scheduled);
     public string ResearchIndicator
     {
         get
         {
+            if(!SignedIn)return "Sign in to unlock AI market analysis";
             var phases=Config.MarketIDs.Select(Phase).ToArray();
-            if(PackLoadConfirmed)return "Research loaded (last game save)";
-            if(phases.Contains(ResearchAvailability.Ready))return "Research ready after /reload";
-            if(phases.Contains(ResearchAvailability.Downloaded))return "Research downloaded; syncing";
-            if(phases.Contains(ResearchAvailability.Scheduled))return "Research waiting for its start time";
-            return phases.Contains(ResearchAvailability.Expired)?"Research expired":"No current research pack";
+            if(PackLoadConfirmed)return "AI analysis loaded (last game save)";
+            if(phases.Contains(ResearchAvailability.Ready))return "AI analysis ready · /reload in game";
+            if(phases.Contains(ResearchAvailability.Downloaded))return "AI analysis downloaded · syncing";
+            if(phases.Contains(ResearchAvailability.Scheduled))return "AI analysis waiting for its start time";
+            return phases.Contains(ResearchAvailability.Expired)?"AI analysis expired":"No AI analysis available yet";
         }
     }
     public MarketSyncState State {get;private set;}=MarketSyncState.NeedsSetup;
     public bool IsBusy=>gate.CurrentCount==0;
+    // The only upload credential. Null or signed out pauses uploads; downloads continue.
+    AccountSession? account;
+    public AccountSession? Account {get=>account;set{account=value;RestorePackStatus();}}
+    bool SignedIn=>Account?.State==AccountState.SignedIn;
+    internal const string SignInRequiredStatus="Sign in to unlock AI market analysis and resume enabled uploads. Your bookkeeping stays available; signing in does not change your sharing choice.";
     public event Action? Changed;
     public IReadOnlyList<ProfitBook> ProfitBooks {get;private set;}=[];
     public MarketSync(Settings? config=null,string? cacheRoot=null,string? publicKeyPath=null)
@@ -198,7 +207,16 @@ public sealed partial class MarketSync
         }
         RefreshPackStatus();
     }
-    void RefreshPackStatus()=>PackStatus=packStates.Count==0?"No verified AI pack yet. Sync will check after setup.":string.Join(Environment.NewLine,packStates.Values);
+    void RefreshPackStatus()=>PackStatus=!SignedIn?"Sign in to unlock AI market analysis. Already loaded advice clears from the game after /reload or your next login.":packStates.Count==0?"No verified AI pack yet. Sync will check after setup.":string.Join(Environment.NewLine,packStates.Values);
+    void ClearStagedAnalysis()
+    {
+        // Only the generated helper is replaced. Personal SavedVariables and
+        // game files are never removed; the game reloads this file at /reload.
+        ClientInstall.CheckInstallPaths(Config.ClientRoot);
+        string path=Path.Combine(Config.ClientRoot,"Interface","AddOns","ForeverFlip_Data","Data.lua");
+        const string empty="ForeverFlipShared={schema=1,markets={}}\n";
+        if(File.Exists(path)&&File.ReadAllText(path)!=empty)Atomic(path,empty);
+    }
     bool IsPackStaged(JsonElement payload)
     {
         string dir=Path.Combine(Config.ClientRoot,"Interface","AddOns","ForeverFlip_Data");
@@ -274,6 +292,7 @@ public sealed partial class MarketSync
             if(!Config.NoticeAccepted){Status="Read the first-run sharing notice to continue.";return;}
             if(string.IsNullOrEmpty(Config.ClientRoot)){Status="Choose your WoW Forever installation to begin.";return;}
             if(!ClientInstall.SupportedRoot(Config.ClientRoot)){Status="WoW Forever was moved or is unavailable. Choose its new folder.";return;}
+            if(!SignedIn)ClearStagedAnalysis();
             if(ClientInstall.NeedsBundled(Config.ClientRoot))Config.PendingAddonInstall=true;
             if(Config.PendingAddonInstall&&!GameRunning()&&SaveProcessProbe(Config.ClientRoot)==GameSaveState.Stopped){
                 await SignedAddonDownload.EnsureAsync(Config.ClientRoot,Config.PendingAddonRepair);Config.PendingAddonInstall=false;Config.PendingAddonRepair=false;Save();Status="Addon installed. Enable ForeverFlip and ForeverFlip_Data on the character screen.";
@@ -289,7 +308,8 @@ public sealed partial class MarketSync
             // Support uploads have their own explicit in-game consent and must
             // run even with market/catalog sharing off or unchanged market data.
             await SyncSupport(signature);
-            if(!Config.ShareMarket&&(signature!=Config.LastLocalRead||Config.MarketIDs.Count==0||!Config.SavedItemCount.HasValue||Config.LoadedPack!=""&&Config.LoadedPackScope=="")){
+            bool uploads=Config.ShareMarket&&SignedIn;
+            if(!uploads&&(signature!=Config.LastLocalRead||Config.MarketIDs.Count==0||!Config.SavedItemCount.HasValue||Config.LoadedPack!=""&&Config.LoadedPackScope=="")){
                 Dictionary<string,object?>? localDB=null;
                 var local=await Task.Run(()=>BuildBatches(Config.SavedFile,db=>localDB=db));
                 var afterLocal=new FileInfo(Config.SavedFile);if(signature!=afterLocal.Length+":"+afterLocal.LastWriteTimeUtc.Ticks)throw new IOException("Save changed during reading; retrying later.");
@@ -299,19 +319,28 @@ public sealed partial class MarketSync
                 Config.MarketIDs=ids.ToList();Config.LastLocalRead=signature;Save();
             }
             await RefreshCatalogCapability();
-            if(Config.ShareMarket && (signature!=Config.LastSignature||!Config.SavedItemCount.HasValue||Config.LoadedPack!=""&&Config.LoadedPackScope==""||Config.ShareCatalog&&Config.CatalogNoticeAccepted&&catalogReadRequired
+            if(uploads && (signature!=Config.LastSignature||!Config.SavedItemCount.HasValue||Config.LoadedPack!=""&&Config.LoadedPackScope==""||Config.ShareCatalog&&Config.CatalogNoticeAccepted&&catalogReadRequired
                 ||signature!=Config.LastResearchSignature&&DateTime.UtcNow>=nextResearchFeedbackAt)){
                 try{await SyncMarketUpload(signature,info);}
                 catch(Exception ex){
                     State=MarketSyncState.Error;Status=SyncFailure(ex);
                     Log(ex.GetType().Name+": "+Status);
                 }
-            }else{State=Config.ShareMarket?MarketSyncState.Synced:MarketSyncState.SharingOff;Status=Config.ShareMarket?"Up to date. Waiting for the next game save.":"Market sharing is off. Shared data downloads remain available.";}
+            }else if(!Config.ShareMarket){State=MarketSyncState.SharingOff;Status=SignedIn?"Market sharing is off. AI analysis downloads remain available.":"Market sharing is off. Sign in to unlock AI market analysis.";}
+            else if(!uploads){State=MarketSyncState.SignInRequired;Status=SignInRequiredStatus;}
+            else{State=MarketSyncState.Synced;Status="Up to date. Waiting for the next game save.";}
+            if(!SignedIn)return;
+            string? packToken=await Account!.AccessTokenAsync();
+            if(packToken==null){ClearStagedAnalysis();return;}
             foreach(string stale in packStates.Keys.Except(Config.MarketIDs).ToArray()){packStates.Remove(stale);researchPacks.Remove(stale);}
             foreach(string market in Config.MarketIDs){
                 if(nextPackAt.TryGetValue(market,out var retry)&&DateTime.UtcNow<retry)continue;
                 try{
-                using var response=await http.GetAsync(Service+"/api/v1/markets/"+Uri.EscapeDataString(market)+"/pack");
+                if(!Account.IsCurrentAccess(packToken))break;
+                using var request=new HttpRequestMessage(HttpMethod.Get,Service+"/api/v1/markets/"+Uri.EscapeDataString(market)+"/pack");
+                request.Headers.Authorization=new AuthenticationHeaderValue("Bearer",packToken);
+                using var response=await http.SendAsync(request);
+                if(response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden){Account.InvalidateAccess(packToken);throw new MarketServiceException("Your account needs to reconnect before AI analysis can download.");}
                 if(response.StatusCode==HttpStatusCode.TooManyRequests){
                     var header=response.Headers.RetryAfter;
                     var delay=header?.Delta??(header?.Date is DateTimeOffset at?at-DateTimeOffset.UtcNow:TimeSpan.FromMinutes(1));
@@ -323,6 +352,7 @@ public sealed partial class MarketSync
                     continue;
                 }response.EnsureSuccessStatusCode();
                 using var envelope=JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                if(!Account.IsCurrentAccess(packToken))break;
                 var payload=Verify(envelope.RootElement,packPublicKey);
                 if(payload.GetProperty("marketID").GetString()!=market)throw new InvalidDataException("Pack market mismatch.");
                 string id=payload.GetProperty("packID").GetString()!;
@@ -357,8 +387,14 @@ public sealed partial class MarketSync
     {
         using var request=new HttpRequestMessage(HttpMethod.Post,Service+path){Content=new StringContent(JsonSerializer.Serialize(body),Encoding.UTF8,"application/json")};
         if(token!=null)request.Headers.Authorization=new AuthenticationHeaderValue("Bearer",token);
+        // Every authenticated write passes here. No await between this check and the send:
+        // after sign-out/local removal or a renewal, a copied token sends nothing further.
+        if(token!=null&&Account?.IsCurrentAccess(token)!=true)
+            throw new MarketServiceException("Upload paused: this PC's account session changed (signed out, removed or renewed). Saved data stays local; the next sync retries with the current sign-in.");
         using var response=await http.SendAsync(request);
         if(!response.IsSuccessStatusCode){
+            // A rejected access token is renewed before its next use.
+            if(token!=null&&response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)Account?.InvalidateAccess(token);
             if(response.StatusCode==HttpStatusCode.UnprocessableEntity){
                 // A server rollback can remove optional capabilities. Recheck
                 // before retrying instead of resending a rejected new shape.
@@ -378,7 +414,7 @@ public sealed partial class MarketSync
         return JsonDocument.Parse(await response.Content.ReadAsStringAsync());
     }
     public static string RequestFailure(HttpStatusCode code,string? detail=null)=>code switch{
-        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden=>"Sharing authorization was rejected. Contact support to reconnect this installation; your local data is preserved.",
+        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden=>"Account authorization was rejected. The app renews the session and retries; if this continues, sign in again under Settings → Account. Local data is preserved.",
         HttpStatusCode.BadRequest=>"Saved data was not accepted. "+(string.IsNullOrWhiteSpace(detail)?"Make a new game save with /reload or logout, then sync again.":new string(detail.Where(c=>!char.IsControl(c)).Take(250).ToArray())),
         HttpStatusCode.RequestEntityTooLarge=>"The saved-data upload is too large. Update the app/addon or contact support.",
         HttpStatusCode.UnprocessableEntity=>"The saved-data format was rejected. Update the app/addon, make a new game save and sync again.",
@@ -458,6 +494,7 @@ public sealed partial class MarketSync
     internal bool StagePackCore(JsonElement p,JsonElement envelope,Func<bool> gameRunning)
     {
         ClientInstall.CheckInstallPaths(Config.ClientRoot);
+        if(!SignedIn)throw new InvalidOperationException("Sign in before staging AI market analysis.");
         if(!Directory.Exists(Path.Combine(Config.ClientRoot,"Interface","AddOns","ForeverFlip")))throw new InvalidDataException("Install the addon before market data.");
         string market=p.GetProperty("marketID").GetString()!;if(!Regex.IsMatch(market,@"^ff1-[a-f0-9]{32}$"))throw new InvalidDataException("Invalid market ID.");
         string cache=packCacheRoot;Atomic(Path.Combine(cache,market+".json"),envelope.GetRawText());

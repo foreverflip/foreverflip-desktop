@@ -1,10 +1,12 @@
-# Desktop 0.1.43-preview.1 - desktop-only source preparation
+# Desktop 0.1.46-preview.1 - desktop-only source update
 
-- Prepared a standalone desktop source tree, desktop tests and locked build tooling.
-- The installer contains no game-addon source. Initial addon install and repair
-  use the existing signed HTTPS release feed; initial installation needs internet.
-- Retained signature, expiry, size, archive, process-state and personal-data checks.
-- Included proposed MIT licensing, dependency notices, privacy disclosure and a
-  manual signing workflow for review. The preview uses a source-generated icon.
-- This is an unsigned preparation build, not a published update. SignPath
-  approval, source-publication approval and native installation acceptance are pending.
+- Added passwordless account sign-in and explicit browser-to-desktop connection,
+  with protected local session storage and sign-out recovery.
+- Require sign-in for shared AI market analysis and authenticated submissions.
+- Preserve existing desktop state before the native installer runs; abort when
+  preservation cannot be verified. Added isolated account and installer tests.
+- The installer contains no addon source. Addon installation and repair use the
+  signed HTTPS feed and retain signature, archive and personal-data safeguards.
+- This source preview remains unsigned. Signing is disabled pending provider
+  approval and separate signed installation/update acceptance. No production
+  feed or executable release is published by this repository's build workflow.
