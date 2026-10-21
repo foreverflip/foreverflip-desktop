@@ -24,6 +24,9 @@ if(args.Length==2&&args[0]=="--recommendation-text"){
 if(args.Length==2&&args[0]=="--support-logs"){
  Directory.CreateDirectory(args[1]);await SupportTests.Run(args[1]);return;
 }
+if(args.Length==2&&args[0]=="--account-tests"){
+ Directory.CreateDirectory(args[1]);await AccountTests.Run(args[1]);return;
+}
 if(args.Length==2&&args[0]=="--backup-tests"){
  Directory.CreateDirectory(args[1]);AddonBackupTests.Run(args[1]);return;
 }
@@ -97,10 +100,14 @@ Assert(LuaReader.Read("ForeverFlipDB={} ForeverFlipExport=\"PRIVATE_EXPORT\"").C
 Reject(()=>LuaReader.Read("ForeverFlipDB={} ForeverFlipExport=(function() end)()"),"executable export");
 string dir=Path.Combine(TestPaths.Root, "forever-test-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(dir);
 try{
+ DesktopStateTests.Run();
+ InstallerPreflightTests.Run();
  RecommendationTextTests.Run(Path.Combine(dir,"recommendation-text.lua"));
  await SavedGameFileTests.Run(dir);
  await SignedAddonDownloadTests.Run(Path.Combine(dir,"signed-addon-download"));
  await SupportTests.Run(dir);
+ await AccountTests.Run(Path.Combine(dir,"account-tests"));
+ await ConnectionTests.Run(Path.Combine(dir,"connection-tests"));
  await FollowupTests.Run(Path.Combine(dir,"followup-tests"));
  string attemptPath=Path.Combine(dir,"update-attempt.json");var updateAttempt=new DesktopUpdateAttempt(attemptPath);
  var browserStart=ExternalLinks.StartInfo("https://forever.blahh.us/market/");
@@ -238,34 +245,37 @@ try{
         MarketSync.ClassifyResearch(now+1,now+3600,true,true,now)==ResearchAvailability.Scheduled&&
         MarketSync.ClassifyResearch(now,now,true,true,now)==ResearchAvailability.None,
         "Research status distinguishes downloaded, staged, loaded and expired packs");
- var unstaged=new MarketSync(packConfig,cacheRoot,publicKey);Assert(unstaged.PackStatus.Contains("1 vendor, 0 resale, 0 craft, 0 research")&&unstaged.PackStatus.Contains("needs staging")&&unstaged.ResearchIndicator=="Research downloaded; syncing"&&!unstaged.PackLoadConfirmed,"Startup restores actual counts without treating a remembered ID as staged");
+ var packAccount=await VerifiedAccountFixture.SignInAsync(Path.Combine(dir,"pack-account"));
+ MarketSync SignedPack()=>new MarketSync(packConfig,cacheRoot,publicKey){Account=packAccount.Account};
+ var locked=new MarketSync(packConfig,cacheRoot,publicKey);Assert(locked.PackStatus.Contains("Sign in")&&!locked.PackLoadConfirmed,"Cached AI stays locked without an account");
+ var unstaged=SignedPack();Assert(unstaged.PackStatus.Contains("1 vendor, 0 resale, 0 craft, 0 research")&&unstaged.PackStatus.Contains("needs staging")&&unstaged.ResearchIndicator=="AI analysis downloaded · syncing"&&!unstaged.PackLoadConfirmed,"Startup restores actual counts without treating a remembered ID as staged");
  var stage=typeof(MarketSync).GetMethod("StagePackCore",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
  Assert(!(bool)stage.Invoke(unstaged,[advice,signedAdvice,(Func<bool>)(()=>true)])!&&!Directory.Exists(Path.Combine(packClient,"Interface","AddOns","ForeverFlip_Data")),"First-time helper creation waits for game exit, while verified pack remains cached");
  stage.Invoke(unstaged,[advice,signedAdvice,(Func<bool>)(()=>false)]);
- var ready=new MarketSync(packConfig,cacheRoot,publicKey);Assert(ready.PackStatus.Contains("Ready for /reload")&&ready.ResearchIndicator=="Research ready after /reload"&&!ready.PackLoadConfirmed,"Cached valid helper is detected before any network tick");
+ var ready=SignedPack();Assert(ready.PackStatus.Contains("Ready for /reload")&&ready.ResearchIndicator=="AI analysis ready · /reload in game"&&!ready.PackLoadConfirmed,"Cached valid helper is detected before any network tick");
  File.WriteAllText(Path.Combine(packClient,"Interface","AddOns","ForeverFlip_Data","Data.lua"),"CORRUPTED");
- Assert(new MarketSync(packConfig,cacheRoot,publicKey).PackStatus.Contains("needs staging"),"Matching cached pack ID cannot hide damaged addon data");
+ Assert(SignedPack().PackStatus.Contains("needs staging"),"Matching cached pack ID cannot hide damaged addon data");
  File.WriteAllText(Path.Combine(cacheRoot,"ff1-"+new string('b',32)+".json"),"MALFORMED");stage.Invoke(unstaged,[advice,signedAdvice,(Func<bool>)(()=>false)]);
- packConfig.LoadedPack="advice-fixture";var loaded=new MarketSync(packConfig,cacheRoot,publicKey);Assert(loaded.PackStatus.Contains("Confirmed loaded")&&loaded.PackLoadConfirmed&&loaded.ResearchIndicator=="Research loaded (last game save)","Saved matching acknowledgement is reported distinctly");
+ packConfig.LoadedPack="advice-fixture";var loaded=SignedPack();Assert(loaded.PackStatus.Contains("Confirmed loaded")&&loaded.PackLoadConfirmed&&loaded.ResearchIndicator=="AI analysis loaded (last game save)","Saved matching acknowledgement is reported distinctly");
  Assert(MarketSync.DescribePack(advice,true,"advice-fixture",now+3600).Contains("expired"),"Expired advice is not described as current");
  var expiredNode=System.Text.Json.Nodes.JsonNode.Parse(advice.GetRawText())!;expiredNode["createdAt"]=now-7200;expiredNode["expiresAt"]=now-1;
  byte[] expiredBytes=Encoding.UTF8.GetBytes(expiredNode.ToJsonString());
  var expiredEnvelope=JsonSerializer.SerializeToElement(new{algorithm="ES256",payload=Convert.ToBase64String(expiredBytes),signature=Convert.ToBase64String(key.SignData(expiredBytes,HashAlgorithmName.SHA256,DSASignatureFormat.Rfc3279DerSequence))});
  File.WriteAllText(Path.Combine(cacheRoot,testMarket+".json"),expiredEnvelope.GetRawText());
- var expired=new MarketSync(packConfig,cacheRoot,publicKey);
- Assert(expired.ResearchIndicator=="Research expired"&&!expired.PackLoadConfirmed&&!expired.ResearchPending,"A real signed expired cache retains its status across app restart without appearing active");
+ var expired=SignedPack();
+ Assert(expired.ResearchIndicator=="AI analysis expired"&&!expired.PackLoadConfirmed&&!expired.ResearchPending,"A real signed expired cache retains its status across app restart without appearing active");
  Reject(()=>MarketSync.Verify(expiredEnvelope,publicKey),"Expired cached advice remains rejected by the activation/download verifier");
  File.WriteAllText(Path.Combine(cacheRoot,testMarket+".json"),signedAdvice.GetRawText());
- packConfig.MarketIDs.Add("ff1-"+new string('c',32));var mixedSync=new MarketSync(packConfig,cacheRoot,publicKey);string mixed=mixedSync.PackStatus;
+ packConfig.MarketIDs.Add("ff1-"+new string('c',32));var mixedSync=SignedPack();string mixed=mixedSync.PackStatus;
  Assert(mixed.Contains("1 vendor")&&mixed.Contains("No valid cached"),"Missing second-market pack cannot overwrite valid first-market status");
  Assert(mixedSync.PackLoadConfirmed,"Other account markets cannot negate the last character's valid scoped loaded acknowledgement");
  packConfig.LoadedPackScope="18:1:110:Other Beta:Alliance";
- Assert(!new MarketSync(packConfig,cacheRoot,publicKey).PackLoadConfirmed,"A pack ID cannot claim loaded confirmation for another market scope");
+ Assert(!SignedPack().PackLoadConfirmed,"A pack ID cannot claim loaded confirmation for another market scope");
  mixedSync.RememberAcknowledgement(LuaReader.Read("ForeverFlipDB={ [\"client\"]={ [\"addon\"]=\"0.13.26\" },[\"sharedData\"]={ [\"packID\"]=\"advice-fixture\",[\"scope\"]=\"18:1:110:Test Beta:Alliance\" } }"));
  Assert(packConfig.LoadedPackScope=="18:1:110:Test Beta:Alliance"&&packConfig.LoadedPack=="advice-fixture","Saved acknowledgement captures its exact scope");
  mixedSync.RememberAcknowledgement(LuaReader.Read("ForeverFlipDB={ [\"client\"]={ [\"addon\"]=\"0.13.26\" } }"));
  Assert(packConfig.LoadedPack==""&&packConfig.LoadedPackScope=="","Missing acknowledgement in a later save clears stale desktop confirmation");
- var changedClient=new MarketSync(packConfig,cacheRoot,publicKey);packConfig.LastUploaded="Previous upload";packConfig.LoadedAddonVersion="0.12.99";packConfig.SavedItemCount=123;packConfig.RecipesSynced=42;packConfig.PendingAddonRepair=true;
+ var changedClient=SignedPack();packConfig.LastUploaded="Previous upload";packConfig.LoadedAddonVersion="0.12.99";packConfig.SavedItemCount=123;packConfig.RecipesSynced=42;packConfig.PendingAddonRepair=true;
  packConfig.ProtectedToken="UNCHANGED_PROTECTED_TEST_TOKEN";packConfig.ShareMarket=false;packConfig.CatalogNoticeAccepted=true;
  changedClient.SelectClient(Path.Combine(dir,"other-client"),"other-save.lua");
  Assert(packConfig.LastPack==""&&packConfig.LoadedPack==""&&packConfig.LoadedPackScope==""&&packConfig.LastUploaded==""&&packConfig.LoadedAddonVersion==""&&packConfig.MarketIDs.Count==0&&packConfig.MarketPackIDs.Count==0&&packConfig.SavedItemCount==null&&packConfig.RecipesSynced==0,"Changing client clears only the prior client dataset, upload and loaded acknowledgements");

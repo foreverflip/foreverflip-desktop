@@ -31,10 +31,12 @@ internal static class SyncIsolationTests
         var config=new Settings{ClientRoot=root,SavedFile=save,NoticeAccepted=true,ShareMarket=true};config.ItemFingerprints["retired-market|old-key"]="keep-until-complete";
         return (config,save);
     }
-    static MarketSync Sync(Settings config,string folder,Func<HttpRequestMessage,Task<HttpResponseMessage>> send)=>
-        new(config,Path.Combine(folder,"packs"),null,new Handler(send)){SaveProcessProbe=_=>GameSaveState.Stopped};
+    static MarketSync Sync(Settings config,string folder,Func<HttpRequestMessage,Task<HttpResponseMessage>> send,AccountSession account)=>
+        new(config,Path.Combine(folder,"packs"),null,new Handler(send)){SaveProcessProbe=_=>GameSaveState.Stopped,Account=account};
     public static async Task Run(string folder)
     {
+        // Uploads need a verified account; anonymous registration must never be attempted.
+        int registrations=0,unverified=0;
         var normalized=new Settings();normalized.UploadRejections[ID(Good)]=new("old","unused legacy key",DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds());
         normalized.UploadRejections["catalog:"+ID(Good)]=new("catalog","retained",DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds());
         normalized.Normalize();Check(!normalized.UploadRejections.ContainsKey(ID(Good))&&normalized.UploadRejections.ContainsKey("catalog:"+ID(Good)),"Obsolete market-wide quarantine survived normalization");
@@ -47,10 +49,12 @@ internal static class SyncIsolationTests
             var batches=MarketSync.BuildBatches(save);Check(batches.Count==3,"Fixture did not create three batches");
             var rejectedKeys=JsonSerializer.SerializeToElement(batches[rejectedBatch]).GetProperty("items").EnumerateArray().Select(i=>i.GetProperty("key").GetString()!).ToHashSet();
             int valid=0,rejected=0,packs=0;bool recover=false;
+            var auth=await VerifiedAccountFixture.SignInAsync(Path.Combine(path,"account"));
             async Task<HttpResponseMessage> Send(HttpRequestMessage request){
                 string route=request.RequestUri!.AbsolutePath;
                 if(route=="/api/v1/catalog/sources")return Reply(HttpStatusCode.OK);
-                if(route=="/api/v1/installations")return Reply(HttpStatusCode.OK,new{token="SYNTHETIC"});
+                if(route=="/api/v1/installations"){registrations++;return Reply(HttpStatusCode.Forbidden);}
+                if((route is "/api/v1/observations" or "/api/v1/catalog/recipes")&&!auth.IsCurrentBearer(request))unverified++;
                 if(route=="/api/v1/observations"){
                     using var body=JsonDocument.Parse(await request.Content!.ReadAsStringAsync());var items=body.RootElement.GetProperty("items");
                     if(items.EnumerateArray().Any(i=>rejectedKeys.Contains(i.GetProperty("key").GetString()!))){
@@ -62,10 +66,10 @@ internal static class SyncIsolationTests
                 if(route=="/api/v1/catalog/recipes")return Reply(HttpStatusCode.OK);
                 throw new Exception("Unexpected synthetic request "+route);
             }
-            var sync=Sync(config,path,Send);await sync.Tick();await sync.Tick();
+            var sync=Sync(config,path,Send,auth.Account);await sync.Tick();await sync.Tick();
             int rejectedCount=rejectedKeys.Count;
             Check(valid==2&&rejected==1&&config.ItemFingerprints.Count==251-rejectedCount&&config.LastSignature==""&&packs==2,"A rejected same-market batch suppressed valid batches or lost acknowledgements");
-            var persisted=MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json"));sync=Sync(persisted,path,Send);await sync.Tick();
+            var persisted=MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json"));sync=Sync(persisted,path,Send,auth.Account);await sync.Tick();
             Check(valid==2&&rejected==1&&packs==3&&persisted.UploadRejections.Keys.Any(k=>k.StartsWith("batch:")),"Restart lost batch-specific suppression");
             File.AppendAllText(save,"\n-- another game save\n");File.SetLastWriteTimeUtc(save,DateTime.UtcNow.AddSeconds(-20));await sync.Tick();
             Check(valid==2&&rejected==2&&persisted.LastSignature=="","New save re-uploaded acknowledged batches or hid the bad batch");
@@ -75,10 +79,12 @@ internal static class SyncIsolationTests
         foreach(bool badFirst in new[]{false,true}){
             string path=Path.Combine(folder,badFirst?"bad-first":"good-first");var (config,save)=Fixture(path,badFirst);
             int good=0,bad=0,packs=0,catalog=0;bool recover=false;string? catalogRealm=null;
+            var auth=await VerifiedAccountFixture.SignInAsync(Path.Combine(path,"account"));
             async Task<HttpResponseMessage> Send(HttpRequestMessage request){
                 string route=request.RequestUri!.AbsolutePath;
                 if(route=="/api/v1/catalog/sources")return Reply(HttpStatusCode.OK);
-                if(route=="/api/v1/installations")return Reply(HttpStatusCode.OK,new{token="SYNTHETIC"});
+                if(route=="/api/v1/installations"){registrations++;return Reply(HttpStatusCode.Forbidden);}
+                if((route is "/api/v1/observations" or "/api/v1/catalog/recipes")&&!auth.IsCurrentBearer(request))unverified++;
                 if(route=="/api/v1/observations"){
                     using var body=JsonDocument.Parse(await request.Content!.ReadAsStringAsync());string realm=body.RootElement.GetProperty("market").GetProperty("realm").GetString()!;
                     if(realm==Bad){bad++;if(!recover)return Reply(HttpStatusCode.BadRequest,new{detail="Unrecognized Forever realm identity"});}else good++;
@@ -90,47 +96,52 @@ internal static class SyncIsolationTests
                 if(route.EndsWith("/pack")){packs++;return Reply(HttpStatusCode.NotFound);}
                 throw new Exception("Unexpected fixture request "+route);
             }
-            var sync=Sync(config,path,Send);await sync.Tick();await sync.Tick();
+            var sync=Sync(config,path,Send,auth.Account);await sync.Tick();await sync.Tick();
             Check(good==1&&bad==1&&packs==4&&catalog==1&&catalogRealm==Good,"One400 blocked another market, catalog or download, or was retried without backoff");
             Check(sync.State==MarketSyncState.Error&&sync.Status.Contains(Bad)&&config.LastSignature==""&&config.ItemFingerprints.Count==2,"Partial upload was reported complete or lost a durable acknowledgement");
             // Restart retains the rejection but public advice downloads continue.
-            var persisted=MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json"));sync=Sync(persisted,path,Send);await sync.Tick();
+            var persisted=MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json"));sync=Sync(persisted,path,Send,auth.Account);await sync.Tick();
             Check(bad==1&&good==1&&packs==6,"Restart lost rejection backoff or repeated an acknowledged upload");
             recover=true;File.AppendAllText(save,"\n-- fresh save\n");File.SetLastWriteTimeUtc(save,DateTime.UtcNow.AddSeconds(-20));await sync.Tick();
             Check(bad==2&&good==1&&persisted.LastSignature!=""&&persisted.ItemFingerprints.Count==2&&!persisted.ItemFingerprints.ContainsKey("retired-market|old-key"),"Changed save did not recover or prune only after full acknowledgement");
         }
         {
             string path=Path.Combine(folder,"catalog-rejection");var (config,_)=Fixture(path);int observations=0,catalog=0,packs=0;
+            var auth=await VerifiedAccountFixture.SignInAsync(Path.Combine(path,"account"));
             async Task<HttpResponseMessage> Send(HttpRequestMessage request){
                 string route=request.RequestUri!.AbsolutePath;
                 if(route=="/api/v1/catalog/sources")return Reply(HttpStatusCode.OK);
-                if(route=="/api/v1/installations")return Reply(HttpStatusCode.OK,new{token="SYNTHETIC"});
+                if(route=="/api/v1/installations"){registrations++;return Reply(HttpStatusCode.Forbidden);}
+                if((route is "/api/v1/observations" or "/api/v1/catalog/recipes")&&!auth.IsCurrentBearer(request))unverified++;
                 if(route=="/api/v1/observations"){observations++;return Reply(HttpStatusCode.OK,new{marketID=ID(Good),added=1});}
                 if(route=="/api/v1/catalog/recipes"){catalog++;return Reply(HttpStatusCode.BadRequest,new{detail="Synthetic catalog rejection"});}
                 if(route.EndsWith("/pack")){packs++;return Reply(HttpStatusCode.NotFound);}
                 await Task.CompletedTask;throw new Exception("Unexpected fixture request "+route);
             }
-            var sync=Sync(config,path,Send);await sync.Tick();await sync.Tick();
+            var sync=Sync(config,path,Send,auth.Account);await sync.Tick();await sync.Tick();
             Check(observations==1&&catalog==1&&packs==2&&config.LastSignature==""&&sync.State==MarketSyncState.Error,"Catalog rejection blocked packs or falsely completed/repeated a save");
             config.ShareMarket=false;await sync.Tick();Check(observations==1&&catalog==1&&packs==3,"Opt-out stopped downloads or allowed further uploads");
         }
         {
             string path=Path.Combine(folder,"rate-limit");var (config,_)=Fixture(path);int posts=0,packs=0;
+            var auth=await VerifiedAccountFixture.SignInAsync(Path.Combine(path,"account"));
             Task<HttpResponseMessage> Send(HttpRequestMessage request){
                 string route=request.RequestUri!.AbsolutePath;
                 if(route=="/api/v1/catalog/sources")return Task.FromResult(Reply(HttpStatusCode.OK));
-                if(route=="/api/v1/installations")return Task.FromResult(Reply(HttpStatusCode.OK,new{token="SYNTHETIC"}));
+                if(route=="/api/v1/installations"){registrations++;return Task.FromResult(Reply(HttpStatusCode.Forbidden));}
                 if(route=="/api/v1/observations"){
+                    if(!auth.IsCurrentBearer(request))unverified++;
                     posts++;var response=Reply(HttpStatusCode.TooManyRequests);response.Headers.RetryAfter=new RetryConditionHeaderValue(TimeSpan.FromMinutes(2));return Task.FromResult(response);
                 }
                 if(route.EndsWith("/pack")){packs++;return Task.FromResult(Reply(HttpStatusCode.NotFound));}
                 throw new Exception("Unexpected fixture request "+route);
             }
-            var sync=Sync(config,path,Send);await sync.Tick();await sync.Tick();
+            var sync=Sync(config,path,Send,auth.Account);await sync.Tick();await sync.Tick();
             Check(posts==1&&packs==2&&config.UploadRetryAt>DateTimeOffset.UtcNow.ToUnixTimeSeconds()+60,"429 Retry-After blocked independent downloads or lacked backoff");
-            var restored=MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json"));sync=Sync(restored,path,Send);await sync.Tick();
+            var restored=MarketSync.LoadSettings(Path.Combine(MarketSync.StateRoot,"settings.json"));sync=Sync(restored,path,Send,auth.Account);await sync.Tick();
             Check(posts==1&&packs==3&&restored.LastSignature=="","Restart bypassed rate-limit backoff or acknowledged rejected data");
         }
+        Check(registrations==0&&unverified==0,$"Upload fixtures registered anonymously ({registrations}) or uploaded without the verified account token ({unverified})");
         Console.WriteLine("PASS rejected-market isolation, both orders, accepted catalog identity, durable400 backoff/recovery, independent advice downloads, catalog isolation, opt-out and persistent429 Retry-After");
     }
 }

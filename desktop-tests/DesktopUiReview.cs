@@ -9,6 +9,13 @@ using System.Windows.Media.Imaging;
 
 static class DesktopUiReview
 {
+ sealed class NoAccountNetwork:System.Net.Http.HttpMessageHandler
+ {
+  public int Calls;
+  protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token){
+   Calls++;return Task.FromException<System.Net.Http.HttpResponseMessage>(new InvalidOperationException("UI review must not use the network."));
+  }
+ }
  public static void Run(string output)
  {
   Exception? failure=null;string visualStatus="not checked";Directory.CreateDirectory(output);
@@ -20,6 +27,9 @@ static class DesktopUiReview
    string fixture=Path.Combine(TestPaths.Root,"desktop-ui-fixture");Directory.CreateDirectory(Path.Combine(fixture,"Interface","AddOns","ForeverFlip"));File.WriteAllText(Path.Combine(fixture,"Interface","AddOns","ForeverFlip","ForeverFlip.toc"),"## Version: 0.12.78");
    var settings=new Settings{ClientRoot=fixture,NoticeAccepted=true,ShareMarket=true,LastUploaded="10/14/2026 9:31 AM",MarketLabel="Classic Beta PvE · Alliance",SavedItemCount=14870,SavedObservationCount=48442,LastPack="preview-pack"};
    var sync=new MarketSync(settings);
+   var accountNetwork=new NoAccountNetwork();
+   var previewAccount=new AccountSession(Path.Combine(output,"ui-account-"+Guid.NewGuid().ToString("N")+".json"),accountNetwork);
+   sync.Account=previewAccount;
    void Set(string name,object value)=>typeof(MarketSync).GetProperty(name)!.SetValue(sync,value);
    Set(nameof(MarketSync.State),MarketSyncState.Synced);Set(nameof(MarketSync.Status),"Up to date. Waiting for the next game save.");Set(nameof(MarketSync.SavedStatus),"10/14/2026 9:30 AM");Set(nameof(MarketSync.PackStatus),"Downloaded; awaiting a saved game acknowledgement after reload/login.");
    var window=new MainWindow(true,sync);
@@ -44,7 +54,9 @@ static class DesktopUiReview
    void Refresh()=>typeof(MainWindow).GetMethod("Render",BindingFlags.Instance|BindingFlags.NonPublic|BindingFlags.DeclaredOnly)!.Invoke(window,null);
    void Select(bool settingsPage)=>Find<Button>(settingsPage?"SettingsTab":"OverviewTab").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
    Assert(window.Icon!=null&&Find<Image>("BrandImage").Source is BitmapSource brand&&brand.PixelWidth==256,"Packaged window/header branding resources must load");
-   Render("home",760,520);
+   Render("home",820,620);
+   Assert(Find<Button>("HomeSignInButton").Visibility==Visibility.Visible&&Find<TextBlock>("AccountHeroTitle").Text=="Sign in to unlock AI market analysis","Home needs a clear AI sign-in action");
+   Assert(window.FindName("AccountEmail")==null,"Desktop should not duplicate the browser email form");
    Assert(window.FindName("ActivityPage")==null&&window.FindName("ActivityTab")==null,"Removed Activity navigation must stay absent");
    var updating=typeof(MainWindow).GetField("checkingUpdates",BindingFlags.Instance|BindingFlags.NonPublic)!;
    updating.SetValue(window,true);Refresh();
@@ -70,24 +82,46 @@ static class DesktopUiReview
    Assert(((System.Windows.Documents.Run)window.FindName("observationCount")).Text==48442.ToString("N0"),"Saved observation count must be rendered");
    Select(true);Assert(Find<ScrollViewer>("SettingsPage").Visibility==Visibility.Visible&&Find<Grid>("OverviewPage").Visibility==Visibility.Collapsed,"Settings navigation must switch pages");
    Render("settings",760,520);
-   var scroll=Find<ScrollViewer>("SettingsPage");Assert(scroll.ScrollableHeight<=1,"Settings controls should fit without scrolling at the default window size (overflow "+scroll.ScrollableHeight+")");
+   var scroll=Find<ScrollViewer>("SettingsPage");Assert(Find<TextBlock>("accountLine").TextWrapping==TextWrapping.Wrap,"Account instructions must wrap instead of clipping");
    Set(nameof(MarketSync.SupportStatus),"Logs sent · report a12f379b7e84 · 10/17/2026 1:54 PM");Refresh();Render("settings-report-sent",760,520);
-   Assert(scroll.ScrollableHeight<=1&&Find<TextBlock>("supportStatus").TextWrapping==TextWrapping.NoWrap,"Support receipt must fit the default Settings layout");
+   Assert(Find<TextBlock>("supportStatus").TextWrapping==TextWrapping.NoWrap,"Support receipt keeps a full tooltip");
    Render("settings-small",620,480);
    Assert(scroll.ScrollableHeight>0,"Small settings layout needs scrolling");scroll.ScrollToEnd();window.UpdateLayout();Render("settings-small-bottom",620,480);
    var startup=Find<CheckBox>("startup");var startupTop=startup.TransformToAncestor(scroll).Transform(new Point());Assert(startupTop.Y>=0&&startupTop.Y<scroll.ViewportHeight,"Startup option must remain reachable by scrolling");
+   scroll.ScrollToTop();
+   typeof(AccountSession).GetProperty("RegistrationOpen")!.SetValue(previewAccount,false);
+   typeof(AccountSession).GetProperty("RegistrationStatus")!.SetValue(previewAccount,"Registration closed today · existing accounts can sign in · resets midnight Chicago time");
+   Refresh();Select(false);Render("home-registration-closed",620,480);
+   Assert(Find<Button>("HomeSignInButton").IsEnabled&&Find<TextBlock>("HomeRegistration").Text.Contains("existing accounts"),"Registration capacity must not block existing sign-in");
+   Assert(previewAccount.RequestConnectAsync().GetAwaiter().GetResult(),"UI fixture could not prepare its local account handoff");Refresh();
+   Render("home-browser-pending-small",620,480);Select(true);
+   Render("account-browser-pending-small",620,480);
+   var reopen=Find<Button>("ReopenSignInButton");var cancel=Find<Button>("CancelSignInButton");
+   Assert(reopen.Visibility==Visibility.Visible&&cancel.Visibility==Visibility.Visible&&window.FindName("AccountEmail")==null,"Pending browser check must expose reopen/cancel without another email form");
+   foreach(var button in new[]{reopen,cancel}){
+    var bounds=button.TransformToAncestor(content).TransformBounds(new Rect(button.RenderSize));
+    Assert(bounds.Width>0&&bounds.Height>=28&&bounds.Left>=0&&bounds.Right<=620,"Pending account action is clipped at the small size");
+   }
+   Render("account-browser-pending-scaled",760,520,1.5);
+   previewAccount.CancelPendingAsync().GetAwaiter().GetResult();Refresh();
+   Assert(reopen.Visibility==Visibility.Collapsed&&previewAccount.PendingVerificationUrl==null&&accountNetwork.Calls==0,"Cancelled preview retained an active browser check or made a network call");
    Select(false);Assert(Find<Grid>("OverviewPage").Visibility==Visibility.Visible,"Overview navigation must return");
    void CheckOverview(string name,int width,int height,double scale=1){
     Render(name,width,height,scale);
-    var actions=new[]{"SyncButton","UpdateButton","SettingsTab","OverviewTab","MarketButton","ResearchStatusButton"};
-    var bounds=actions.Select(id=>Find<Button>(id).TransformToAncestor(content).TransformBounds(new Rect(Find<Button>(id).RenderSize))).ToArray();
-    for(int i=0;i<bounds.Length;i++){
-     Assert(bounds[i].Width>0&&bounds[i].Height>=28&&bounds[i].Left>=0&&bounds[i].Top>=0&&bounds[i].Right<=width&&bounds[i].Bottom<=height,name+": unreachable control "+actions[i]);
-     for(int j=0;j<i;j++)Assert(!bounds[i].IntersectsWith(bounds[j]),name+": overlapping controls "+actions[i]+" / "+actions[j]);
+    var actions=new[]{"SyncButton","UpdateButton","SettingsTab","OverviewTab","MarketButton","AccountStatusButton"};
+    var homeScroll=Find<ScrollViewer>("HomeScroll");
+    foreach(string action in actions){
+     var button=Find<Button>(action);if(homeScroll.IsAncestorOf(button)){button.BringIntoView();content.UpdateLayout();}
+     var bounds=button.TransformToAncestor(content).TransformBounds(new Rect(button.RenderSize));
+     Assert(bounds.Width>0&&bounds.Height>=28&&bounds.Left>=0&&bounds.Right<=width&&bounds.Top>=0&&bounds.Bottom<=height,name+": unreachable control "+action);
+     if(homeScroll.IsAncestorOf(button)){
+      var viewport=homeScroll.TransformToAncestor(content).TransformBounds(new Rect(homeScroll.RenderSize));
+      Assert(bounds.Top>=viewport.Top-1&&bounds.Bottom<=viewport.Bottom+1,name+": Home action cannot scroll into view: "+action);
+     }
     }
     var overview=Find<Grid>("OverviewPage");
-    Assert(overview.Children.OfType<ScrollViewer>().Count()==0,"Overview must not require page scrolling");
-    var research=Find<TextBlock>("researchIndicator");Assert(research.ActualHeight>=16&&research.Text=="No current research pack",name+": compact research status is missing or misleading");
+    Assert(Find<ScrollViewer>("HomeScroll").HorizontalScrollBarVisibility==ScrollBarVisibility.Disabled,"Home must fit horizontally at small sizes");
+    var research=Find<TextBlock>("researchIndicator");Assert(research.Text==sync.ResearchIndicator&&(Find<Button>("ResearchStatusButton").Visibility!=Visibility.Visible||research.ActualHeight>=16),name+": compact research status is missing or misleading");
     Assert(Find<TextBlock>("researchDot").ActualWidth<=30,name+": research indicator is not compact");
     var install=Find<TextBlock>("installationStatus");Assert(install.ActualWidth>=120,name+": update buttons crowd out installed status");
    }
@@ -110,15 +144,20 @@ static class DesktopUiReview
    Assert(notes.Any(t=>t.Contains("0.1.33"))&&notes.Any(t=>t.Contains("0.13.90"))&&notes.Any(t=>t.Contains("Shift-click")),"Packaged release notes must identify current versions and linking behavior");
    Assert(Find<ScrollViewer>("PatchNotesPage").ScrollableHeight>0,"Older notes must remain scrollable");Select(false);
    CheckOverview("home-small",620,480);CheckOverview("home-laptop",900,640);CheckOverview("home-150percent",960,660,1.5);CheckOverview("home-200percent",800,480,2);
+   var vault=typeof(AccountSession).GetField("vault",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(previewAccount)!;
+   vault.GetType().GetProperty("Email")!.SetValue(vault,"preview@example.test");vault.GetType().GetProperty("RefreshToken")!.SetValue(vault,"SYNTHETIC_UI_REFRESH");
+   typeof(AccountSession).GetProperty("Status")!.SetValue(previewAccount,"Signed in as preview@example.test.");Refresh();Render("home-signed-in",820,620);
+   Assert(Find<Button>("HomeSignInButton").Visibility==Visibility.Collapsed&&Find<Button>("ResearchStatusButton").Visibility==Visibility.Visible,"Signed in Home must show analysis instead of a login prompt");
+   Select(true);Render("settings-signed-in-small",620,480);Assert(Find<Button>("AccountMoreButton").Visibility==Visibility.Visible,"Secondary account actions belong in More");Select(false);
    string market="ff1-"+new string('a',32);
    var research=(System.Collections.IDictionary)typeof(MarketSync).GetField("researchPacks",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(sync)!;
    long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();settings.MarketIDs.Add(market);
    research[market]=new ResearchPack(now-1,now+3600,true,"preview-pack","18:1:110:Classic Beta PvE:Alliance");settings.LoadedPack="";Refresh();
-   Assert(Find<TextBlock>("researchIndicator").Text=="Research ready after /reload","Staged research must show the next action");Render("home-research-ready",760,520);
+   Assert(Find<TextBlock>("researchIndicator").Text=="AI analysis ready · /reload in game","Staged research must show the next action");Render("home-research-ready",760,520);
    settings.LoadedPack="preview-pack";settings.LoadedPackScope="18:1:110:Classic Beta PvE:Alliance";Refresh();
-   Assert(Find<TextBlock>("researchIndicator").Text=="Research loaded (last game save)","Only acknowledged valid research may show as loaded");Render("home-research-loaded",760,520);
+   Assert(Find<TextBlock>("researchIndicator").Text=="AI analysis loaded (last game save)","Only acknowledged valid research may show as loaded");Render("home-research-loaded",760,520);
    research[market]=new ResearchPack(now-3600,now-1,true,"preview-pack","18:1:110:Classic Beta PvE:Alliance");Refresh();
-   Assert(Find<TextBlock>("researchIndicator").Text=="Research expired","Expired research must not show as loaded");Render("home-research-expired",760,520);
+   Assert(Find<TextBlock>("researchIndicator").Text=="AI analysis expired","Expired research must not show as loaded");Render("home-research-expired",760,520);
    research.Clear();settings.MarketIDs.Clear();settings.LoadedPack="";settings.LoadedPackScope="";Refresh();
    Set(nameof(MarketSync.PackStatus),string.Join("\n",Enumerable.Repeat("Classic Beta PvE · Alliance: 4 vendor, 0 resale, 1 craft, 1 research lead(s). Pack preview. Ready for /reload or login; game loading not yet confirmed.",8)));Refresh();
    typeof(MainWindow).GetMethod("UpdateMessage",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(window,["Updates unavailable: "+new string('x',400)]);

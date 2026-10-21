@@ -30,17 +30,18 @@ internal static class ResearchTests
         var defaults=new Settings();Assert(defaults.ShareMarket&&!defaults.NoticeAccepted,"New installs show one checked sharing choice before uploads");
         var config=new Settings{ShareMarket=true,NoticeAccepted=true};
         string cache=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"ff-research-"+Guid.NewGuid().ToString("N"));
-        var sync=new MarketSync(config,cache,null,new Handler(System.Net.HttpStatusCode.BadRequest));
+        var auth=VerifiedAccountFixture.SignInAsync(System.IO.Path.Combine(cache,"account")).GetAwaiter().GetResult();
+        var sync=new MarketSync(config,cache,null,new Handler(System.Net.HttpStatusCode.BadRequest)){Account=auth.Account};
         var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
         typeof(MarketSync).GetField("researchFeedbackCapability",flags)!.SetValue(sync,true);
         var optional=typeof(MarketSync).GetMethod("SyncResearchFeedbackOptional",flags)!;
-        bool sent=((Task<bool>)optional.Invoke(sync,new object[]{db,new List<object>{batch},"fixture-token","save-v1"})!).GetAwaiter().GetResult();
+        bool sent=((Task<bool>)optional.Invoke(sync,new object[]{db,new List<object>{batch},auth.Access,"save-v1"})!).GetAwaiter().GetResult();
         Assert(!sent&&config.LastResearchSignature==""&&config.ResearchFingerprints.Count==0,"Failed feedback cannot acknowledge a save or check");
         Assert((DateTime)typeof(MarketSync).GetField("nextResearchFeedbackAt",flags)!.GetValue(sync)!>DateTime.UtcNow.AddMinutes(4),"Failed feedback retries with backoff");
-        sync=new MarketSync(config,cache,null,new Handler(System.Net.HttpStatusCode.OK));
+        sync=new MarketSync(config,cache,null,new Handler(System.Net.HttpStatusCode.OK)){Account=auth.Account};
         typeof(MarketSync).GetField("researchFeedbackCapability",flags)!.SetValue(sync,true);
         string other="ff1-"+new string('b',32)+":other-check";config.ResearchFingerprints[other]="other-ack";
-        sent=((Task<bool>)optional.Invoke(sync,new object[]{db,new List<object>{batch},"fixture-token","save-v1"})!).GetAwaiter().GetResult();
+        sent=((Task<bool>)optional.Invoke(sync,new object[]{db,new List<object>{batch},auth.Access,"save-v1"})!).GetAwaiter().GetResult();
         Assert(sent&&config.LastResearchSignature=="save-v1"&&config.ResearchFingerprints[other]=="other-ack","Successful retry acknowledges only its markets and preserves the other faction");
         db["ledgers"]=new Dictionary<string,object?>{{"PRIVATE",new{postingOutcomes=new{sold=999}}}};
         Assert(!JsonSerializer.Serialize(MarketSync.BuildResearchFeedback(db,[batch],now)).Contains("postingOutcomes"),"Own posting outcomes remain private");
@@ -48,9 +49,9 @@ internal static class ResearchTests
         for(int i=0;i<101;i++){var copy=new Dictionary<string,object?>(row);copy["id"]="epoch:"+i;many[i.ToString()]=copy;}
         var manyDB=new Dictionary<string,object?>{{"researchChecks",new Dictionary<string,object?>{{scope,many}}}};
         var interrupted=new Settings{ShareMarket=true,NoticeAccepted=true};interrupted.ResearchFingerprints[other]="keep";
-        sync=new MarketSync(interrupted,cache,null,new Handler(System.Net.HttpStatusCode.OK,()=>interrupted.ShareMarket=false));
+        sync=new MarketSync(interrupted,cache,null,new Handler(System.Net.HttpStatusCode.OK,()=>interrupted.ShareMarket=false)){Account=auth.Account};
         typeof(MarketSync).GetField("researchFeedbackCapability",flags)!.SetValue(sync,true);
-        sent=((Task<bool>)optional.Invoke(sync,new object[]{manyDB,new List<object>{batch},"fixture-token","interrupted-save"})!).GetAwaiter().GetResult();
+        sent=((Task<bool>)optional.Invoke(sync,new object[]{manyDB,new List<object>{batch},auth.Access,"interrupted-save"})!).GetAwaiter().GetResult();
         Assert(sent&&interrupted.LastResearchSignature==""&&interrupted.ResearchFingerprints.Count==101&&interrupted.ResearchFingerprints[other]=="keep","Sharing-off mid-report retains acknowledgements and leaves the whole save incomplete");
         Console.WriteLine("PASS: optional feedback errors are isolated, backed off and unacknowledged; successful retry and other-market cache retention");
         Console.WriteLine("PASS: research feedback privacy, identity, time, market deduplication and pack routing");

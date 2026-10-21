@@ -56,14 +56,10 @@ public sealed partial class MarketSync
         RememberAcknowledgement(savedDB!);Config.LastLocalRead=signature;RememberDataset(batches);
         // Download discovery depends on the save, not on every upload succeeding.
         Config.MarketIDs=batches.Select(BatchID).Distinct().ToList();Save();
-        if(string.IsNullOrEmpty(Config.ProtectedToken)){
-            try{
-                using var registration=await Post("/api/v1/installations",new{noticeVersion="2026-10-14",marketSharing=true});
-                string token=registration.RootElement.GetProperty("token").GetString()!;
-                Config.ProtectedToken=Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(token),null,DataProtectionScope.CurrentUser));Save();
-            }catch(MarketServiceException ex){RateBackoff(ex);throw;}
-        }
-        string credential=Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(Config.ProtectedToken),null,DataProtectionScope.CurrentUser));
+        // Only a verified account access token can upload. No anonymous
+        // registration; legacy installation tokens are deliberately ignored.
+        string? credential=Account==null?null:await Account.AccessTokenAsync();
+        if(credential==null){State=MarketSyncState.SignInRequired;Status=SignInRequiredStatus;return;}
         State=MarketSyncState.Uploading;Status="Uploading changed observations…";Changed?.Invoke();
         var retained=new HashSet<string>();var accepted=new List<object>();var warnings=new List<string>();
         int added=0,omittedDepth=0;bool sent=false,complete=true;
